@@ -24,47 +24,15 @@ tick; the annotated frame the backend produced is saved next to the repo:
 *Green Mango, 8 persons in view, in/out counter live over the operator-drawn
 line, motorcycle + pedestrian tracking, YOLO26x on OpenVINO CPU.*
 
-More proofs of each of the 10 layers on the same camera are in
-[`docs/proof/`](docs/proof/) (`01_paths` through `10_plates`, backend-rendered
-annotated frames).
+Additional per-layer sample frames captured on the same camera are in
+[`docs/proof/samples/`](docs/proof/samples/) (five frames per layer).
 
 ### Layer gallery
 
-One representative backend-rendered frame per analysis layer, all captured
-on the Soi Green Mango live camera. Each frame is what the backend actually
-draws before the JPEG leaves the process; the dashboard's canvas overlay
-draws the same boxes on top of the live video for smoothness.
-
-![Paths and speeds layer](docs/proof/01_paths_backend.jpg)
-
-*Paths & speeds - per-track trail history with a speed tier chip
-(slow / moving / fast km/h estimate) on each confirmed object.*
-
-![Heat signature layer](docs/proof/02_heat_backend.jpg)
-
-*Heat signature - 48x27 activity grid with a 180 s half-life decay,
-warm cells mark where people spent time recently.*
-
-![Pose and skeleton layer](docs/proof/03_pose_backend.jpg)
-
-*Pose & skeleton - top-down COCO-17 keypoints drawn only on person
-crops tall enough for legible joints (the caption states how many
-were in range).*
-
-![Hand gestures layer](docs/proof/04_gestures_backend.jpg)
-
-*Hand gestures - temporal arm windows across recent frames, chips
-label the detected gesture (hand_raised, both_hands_up, wave).*
-
-![Body anomalies layer](docs/proof/05_body_backend.jpg)
-
-*Body anomalies - kinematic + gesture flags per person track; a
-red ALERT banner burns while a fall / erratic verdict is live.*
-
-![Face detection layer](docs/proof/06_faces_backend.jpg)
-
-*Face detection - YuNet face rectangles at conf >= 0.6 and
->= 16px, no identification is performed.*
+Two representative backend-rendered frames, both captured on the Soi
+Green Mango live camera. Each frame is what the backend actually draws
+before the JPEG leaves the process; the dashboard's canvas overlay draws
+the same boxes on top of the live video for smoothness.
 
 ![Line crossing layer](docs/proof/07_line_backend.jpg)
 
@@ -75,18 +43,6 @@ increment on foot-of-box side flips.*
 
 *Zone & loitering - operator-drawn polygons, dwell clock per person
 inside; alert fires when dwell crosses the per-zone threshold.*
-
-![Parking occupancy layer](docs/proof/09_parking_backend.jpg)
-
-*Parking occupancy - operator-drawn spots; green = free, red =
-occupied; state flips emit occupied / vacated events and a toast on
-the dashboard.*
-
-![License plates layer](docs/proof/10_plates_backend.jpg)
-
-*License plates - two-stage LPR (yolov8n-plate detector plus
-fast-plate-ocr) with a per-track plate cache and vehicle-width
-range gate.*
 
 ## Table of contents
 

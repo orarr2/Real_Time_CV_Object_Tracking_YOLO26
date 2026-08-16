@@ -307,20 +307,6 @@ Failure classes:
 - Local LLM daily summary (P8 in Nawaf's research). Requires Ollama
   running locally and a fresh route in `dashboard_server`.
 
-### iPhone remote control (task #12)
-
-Per the user's global rule (`Claude Code Remote Control` in `sub`
-mode, not `FLAG`): the machine needs `claude-code` CLI installed +
-listening on an exposed port. Simplest path is:
-
-1. Install `claude-code` on the operator laptop.
-2. Run `claude-code --serve --port 5901` (or whichever port).
-3. Expose it via Tailscale to the iPhone (do NOT open the port to the
-   public internet).
-4. Point the iPhone Claude Code app at that Tailscale hostname.
-
-No change to the audit-target project is required.
-
 ## 10. Camera catalog snapshot
 
 `src/app/cameras.py` after cleanup - nine Thailand streams:
