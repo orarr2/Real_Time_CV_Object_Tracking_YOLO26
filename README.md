@@ -13,37 +13,6 @@ one of 10 analysis layers on top of the live video.
   footfall time-series, dwell tracking, re-ID and business score before
   binding the same dashboard inline for exploratory work.
 
-## Live proof
-
-The system was verified on the Soi Green Mango (Chaweng, Koh Samui) YouTube
-webcam. Real-time boxes stick to real people; the counter updates every
-tick; the annotated frame the backend produced is saved next to the repo:
-
-![Line crossing on Green Mango](docs/proof/07_line_backend.jpg)
-
-*Green Mango, 8 persons in view, in/out counter live over the operator-drawn
-line, motorcycle + pedestrian tracking, YOLO26x on OpenVINO CPU.*
-
-Additional per-layer sample frames captured on the same camera are in
-[`docs/proof/samples/`](docs/proof/samples/) (five frames per layer).
-
-### Layer gallery
-
-Two representative backend-rendered frames, both captured on the Soi
-Green Mango live camera. Each frame is what the backend actually draws
-before the JPEG leaves the process; the dashboard's canvas overlay draws
-the same boxes on top of the live video for smoothness.
-
-![Line crossing layer](docs/proof/07_line_backend.jpg)
-
-*Line crossing - operator-drawn line with in/out counters that
-increment on foot-of-box side flips.*
-
-![Zone and loitering layer](docs/proof/08_loiter_backend.jpg)
-
-*Zone & loitering - operator-drawn polygons, dwell clock per person
-inside; alert fires when dwell crosses the per-zone threshold.*
-
 ## Table of contents
 
 - [Quick start](#quick-start)

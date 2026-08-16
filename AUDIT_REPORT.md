@@ -412,18 +412,7 @@ Started this pass at 17 failing tests. After the session:
 
 Final: **124 passed, 0 failed**.
 
-### 11.6 Proof of live analysis on Green Mango
-
-Ten backend-rendered annotated frames saved to `docs/proof/`
-(01_paths, 02_heat, 03_pose, 04_gestures, 05_body, 06_faces, 07_line,
-08_loiter, 09_parking, 10_plates). Seven of them (gestures, body,
-faces, line, loiter, parking, plates) show 8-12 real people with 5-8
-pose skeletons drawn at 59-91% confidence over the live Soi Green
-Mango stream. Layers `paths`, `heat`, `pose` produced frames but caught
-0 boxes at their polled ticks (transient - the tab race between the
-autonomous cycler and the operator's open Analyze panel).
-
-### 11.7 Repo cleanup
+### 11.6 Repo cleanup
 
 Deleted `src/web/cameras.js` (dead code: no importers, still carried
 Turkey/Konya slot fixtures from the pre-cleanup era).
