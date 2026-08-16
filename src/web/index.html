@@ -1,0 +1,1012 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- During development, never cache the HTML shell so JS+CSS edits show up
+       on the next normal reload. -->
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>Real-Time CV Object Tracking - YOLO26</title>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0;
+           background: #0f1115; color: #e7e9ee; }
+    header { padding: 18px 24px; border-bottom: 1px solid #222;
+             display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+    header h1 { font-size: 20px; margin: 0; }
+    .sub { color: #8b909a; font-size: 13px; }
+    .model-metrics-line { margin-top: 3px; }
+    .model-metrics-line b { color: #e7e9ee; font-weight: 600; }
+    .model-metrics-line.stale { color: #6f7480; }
+    #status .live { color: #36d399; }
+    #status .stale { color: #f0a35e; }
+    #status .down { color: #ef4444; }
+    main { padding: 20px; max-width: 100%; margin: 0 auto; }
+
+    /* Workspace tabs. Hiding is CSS-only so every section keeps living
+       (charts, HLS players) while off-screen. */
+    .tabbar { display: flex; gap: 6px; max-width: 100%;
+              margin: 0 auto; padding: 12px 20px 0; }
+    .tabbar button { padding: 9px 22px; font-size: 13px; cursor: pointer;
+              background: #14171e; color: #8b909a;
+              border: 1px solid #232733; border-bottom: none;
+              border-radius: 10px 10px 0 0; }
+    .tabbar button.on { background: #1d2129; color: #e7e9ee;
+              border-color: #2e3442; font-weight: 600; }
+    .tabbar button:hover { color: #e7e9ee; }
+    main[data-active-tab="analysis"] > [data-tab]:not([data-tab="analysis"]),
+    main[data-active-tab="investigation"] > [data-tab]:not([data-tab="investigation"]),
+    main[data-active-tab="rl"]       > [data-tab]:not([data-tab="rl"]) {
+      display: none !important;
+    }
+
+    /* Picker bar: dropdown of catalog cams + uploaded files, upload button,
+       start button. Sits above the single tile. */
+    #picker-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+                  padding: 10px 12px; background: #171a21;
+                  border: 1px solid #232733; border-radius: 12px;
+                  margin-bottom: 12px; }
+    #picker-bar select { background: #0c0e13; color: #e7e9ee;
+                         border: 1px solid #2c3140; border-radius: 6px;
+                         padding: 7px 10px; font-size: 13px;
+                         flex: 1; min-width: 220px; max-width: 520px; }
+    #picker-bar button { background: #1e293b; color: #e2e8f0;
+                         border: 1px solid #334155; border-radius: 6px;
+                         padding: 7px 14px; font-size: 13px; cursor: pointer; }
+    #picker-bar button:hover { background: #24324a; }
+    #picker-bar button:disabled { opacity: 0.6; cursor: default; }
+    #start-cam { background: #2563eb; color: #fff; border-color: #2563eb; }
+    #start-cam:hover { background: #1d4ed8; }
+    #picker-status { color: #6f7480; font-size: 12px; flex-basis: 100%; }
+
+    /* Single-tile layout: one camera, full viewport width, capped at 70vh. */
+    #tile-single { background: #171a21; border: 1px solid #232733;
+                   border-radius: 12px; padding: 8px;
+                   display: flex; flex-direction: column; gap: 6px;
+                   max-width: 100%; width: 100%; margin: 0 auto; }
+    .tile-head { display: flex; align-items: baseline; gap: 10px;
+                 justify-content: space-between; padding: 2px 4px 0; }
+    .tile-head-left { min-width: 0; }
+    #tile-single h2 { margin: 0; font-size: 14px; font-weight: 600;
+               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #tile-single .city { color: #8b909a; font-size: 11px;
+                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tile-head-right { display: flex; gap: 6px; flex-wrap: nowrap;
+                       align-items: center; flex-shrink: 0; }
+
+    .analyze-btn { display: none; }
+    .private-backend .analyze-btn { display: inline-block; }
+
+    .analysis-wrap { position: relative; width: 100%; height: 100%;
+                     background: #000; }
+    .analysis-wrap img { width: 100%; height: 100%; object-fit: contain;
+                         display: block; background: #000; }
+    .analysis-status { position: absolute; left: 0; right: 0; top: 45%;
+                       text-align: center; color: #94a3b8; font-size: 13px;
+                       pointer-events: none; }
+    .analysis-live-tag { position: absolute; top: 8px; right: 8px;
+                         background: rgba(220, 38, 38, 0.85); color: #fff;
+                         font-size: 10.5px; font-weight: 600;
+                         padding: 2px 8px; border-radius: 6px;
+                         letter-spacing: 0.04em; }
+    .analysis-stop { position: absolute; bottom: 8px; right: 8px;
+                     cursor: pointer; background: #1e293b;
+                     border: 1px solid #334155; color: #e2e8f0;
+                     border-radius: 8px; padding: 5px 12px;
+                     font-size: 12.5px; }
+    .analysis-stop:hover { background: #24324a; }
+
+    /* Full-width video, capped at 70vh so the whole tile fits on screen. */
+    .video-wrap { position: relative; width: 100%;
+                  max-height: 70vh; aspect-ratio: 16/9;
+                  background: #0c0e13; border-radius: 8px; overflow: hidden;
+                  margin: 0 auto; }
+    .video-wrap iframe, .video-wrap img, .video-wrap video {
+        width: 100%; height: 100%; border: 0; object-fit: contain;
+        background: #0c0e13; display: block;
+    }
+    .video-fallback { display: flex; align-items: center; justify-content: center;
+                      width: 100%; height: 100%; padding: 14px; text-align: center;
+                      color: #8b909a; font-size: 13px; }
+    .video-fallback a { color: #4f8cff; text-decoration: none; }
+
+    /* Top overlay strip: KPI values + counts-age. */
+    .video-overlay-bottom { position: absolute; left: 0; right: 0; top: 0;
+        padding: 6px 10px 18px;
+        background: linear-gradient(to bottom, rgba(0,0,0,0.75), rgba(0,0,0,0));
+        color: #fff; font-size: 12px; line-height: 1.3;
+        display: flex; gap: 10px; flex-wrap: wrap; align-items: baseline;
+        pointer-events: none; }
+    .video-overlay-bottom .kpi { display: inline-flex; align-items: baseline;
+        gap: 4px; }
+    .video-overlay-bottom .kpi .lbl { color: rgba(255,255,255,0.7);
+        font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .video-overlay-bottom .kpi .val { font-size: 15px; font-weight: 700; }
+    .video-overlay-bottom .kpi.vehicles .val { color: #f0a35e; }
+    .video-overlay-bottom .age { color: rgba(255,255,255,0.65); font-size: 11px;
+        margin-left: auto; }
+    .video-overlay-bottom .age.stale { color: #ef4444; font-weight: 600; }
+
+    .anomaly-badge { display: inline-flex; align-items: center; gap: 4px;
+                     padding: 2px 8px; border-radius: 999px; font-size: 11px;
+                     max-width: 100%; white-space: nowrap;
+                     overflow: hidden; text-overflow: ellipsis; }
+    .anomaly-badge.ok   { background: rgba(54, 211, 153, 0.12); color: #36d399; }
+    .anomaly-badge.warn,
+    .anomaly-badge.spike { background: rgba(239, 68, 68, 0.15);   color: #ef4444; }
+    .anomaly-badge.unk  { background: rgba(139, 144, 154, 0.12); color: #8b909a; }
+    .anomaly-badge .dot { width: 6px; height: 6px; border-radius: 50%;
+                          background: currentColor; flex-shrink: 0; }
+
+    /* Activity Index: 0-10 + label, color graded from quiet to crowded. */
+    .activity-badge { display: inline-flex; align-items: center; gap: 4px;
+                      padding: 2px 8px; border-radius: 999px; font-size: 11px;
+                      font-weight: 600; white-space: nowrap; }
+    .activity-badge .dot { width: 6px; height: 6px; border-radius: 50%;
+                           background: currentColor; flex-shrink: 0; }
+    .activity-badge.act-quiet    { background: rgba(139,144,154,0.15); color: #8b909a; }
+    .activity-badge.act-moderate { background: rgba( 79,140,255,0.15); color: #4f8cff; }
+    .activity-badge.act-busy     { background: rgba(240,163, 94,0.15); color: #f0a35e; }
+    .activity-badge.act-crowded  { background: rgba(239, 68, 68,0.15); color: #ef4444; }
+    .activity-badge.act-unknown  { background: rgba(139,144,154,0.10); color: #6f7480; }
+
+    .footnote { color: #6f7480; font-size: 11px; }
+
+    .anomaly-wrap {
+        background: #171a21; border: 1px solid #232733; border-radius: 14px;
+        padding: 16px; margin-top: 20px;
+    }
+    .anomaly-wrap h2 { margin: 0 0 10px; font-size: 16px; }
+
+    /* Review panel: pick one saved detection, decide if the label is right. */
+    .review-wrap { background: #171a21; border: 1px solid #232733;
+                   border-radius: 12px; padding: 16px; margin-top: 16px; }
+    .review-wrap h2 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
+    .review-wrap .sub { color: #8b909a; font-size: 12px; margin-bottom: 12px; }
+    .review-body { display: grid; gap: 16px;
+                   grid-template-columns: minmax(220px, 320px) 1fr;
+                   align-items: start; }
+    @media (max-width: 720px) { .review-body { grid-template-columns: 1fr; } }
+    .review-empty { padding: 40px 20px; text-align: center; color: #6f7480;
+                    font-size: 13px; }
+    .review-buttons { display: flex; flex-direction: column; gap: 12px;
+        margin-top: 14px; }
+    .review-buttons .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .review-buttons button { background: transparent; color: #e7e9ee;
+        border: 1px solid #2c3140; border-radius: 6px;
+        padding: 8px 16px; font-size: 13px; font-weight: 500; cursor: pointer;
+        transition: border-color .1s, background .1s; }
+    .review-buttons button:hover { border-color: #8b909a; }
+    .review-buttons button.on { border-color: #4f8cff;
+        background: rgba(79,140,255,0.10); color: #fff; }
+    .review-buttons button.next { color: #8b909a; margin-left: auto; }
+    .review-buttons button.next:hover { color: #e7e9ee; }
+    .review-note-wrap { display: none; }
+    .review-note-wrap.open { display: block; }
+    .review-note-wrap textarea { background: #0c0e13; border: 1px solid #2c3140;
+        color: #e7e9ee; border-radius: 6px; padding: 6px 8px; font-size: 12px;
+        font-family: inherit; resize: vertical; width: 100%; }
+    .review-stats { font-size: 12px; color: #8b909a; margin-top: 12px; }
+    .review-stats b { color: #e7e9ee; }
+    .review-status { font-size: 12px; color: #8b909a; margin-top: 8px; }
+    .review-status.err { color: #ef4444; }
+    .review-frame-body { display: grid; gap: 16px;
+        grid-template-columns: minmax(320px, 2fr) minmax(220px, 1fr);
+        align-items: start; }
+    @media (max-width: 800px) { .review-frame-body { grid-template-columns: 1fr; } }
+    .canvas-wrap { position: relative; background: #0c0e13;
+        border: 1px solid #232733; border-radius: 10px; overflow: hidden;
+        min-height: 240px; }
+    .canvas-wrap canvas { display: block; width: 100%; height: auto;
+        cursor: pointer; touch-action: none; }
+    .canvas-empty { padding: 60px 20px; text-align: center; color: #6f7480;
+        font-size: 13px; }
+    .canvas-hint { position: absolute; left: 8px; bottom: 6px;
+        color: rgba(255,255,255,0.7); font-size: 11px; text-shadow: 0 0 4px #000;
+        pointer-events: none; }
+    .frame-meta { display: flex; gap: 10px; align-items: baseline; }
+    .frame-cam { color: #e7e9ee; font-weight: 600; font-size: 13px; }
+    .frame-path { color: #6f7480; font-size: 11px;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .frame-boxes-summary { display: flex; gap: 12px; flex-wrap: wrap;
+        margin-top: 8px; font-size: 12px; color: #8b909a; }
+    .frame-boxes-summary .fbs-box { display: inline-flex; align-items: center; gap: 4px; }
+    .frame-boxes-summary .dot { display: inline-block; width: 8px; height: 8px;
+        border-radius: 50%; }
+    .frame-boxes-summary b { color: #e7e9ee; }
+    .frame-controls { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap;
+        align-items: center; }
+    .mode-btn { background: transparent; color: #8b909a;
+        border: 1px solid #2c3140; border-radius: 6px;
+        padding: 6px 12px; font-size: 12px; cursor: pointer; }
+    .mode-btn.on { background: rgba(79,140,255,0.15); color: #e7e9ee;
+        border-color: #4f8cff; }
+    .frame-controls select { background: #0c0e13; border: 1px solid #2c3140;
+        color: #e7e9ee; border-radius: 6px; padding: 5px 8px; font-size: 12px; }
+
+    .disk-usage { display: flex; align-items: center; gap: 10px;
+        font-size: 11px; color: #6f7480; margin-top: 8px; flex-wrap: wrap; }
+    .disk-usage .bar { flex: 1; min-width: 120px; max-width: 240px;
+        height: 4px; background: #232733; border-radius: 2px; overflow: hidden; }
+    .disk-usage .bar i { display: block; height: 100%; background: #4f8cff;
+        transition: width .3s; }
+    .disk-usage .bar.high i { background: #f0a35e; }
+    .disk-usage .bar.full i { background: #ef4444; }
+    .disk-usage button { background: none; border: 1px solid #2c3140;
+        color: #8b909a; border-radius: 4px; padding: 2px 8px; font-size: 10px;
+        cursor: pointer; }
+    .disk-usage button:hover { border-color: #ef4444; color: #ef4444; }
+
+    /* Frame strip: every stored frame, clickable, reviewed ones badged. */
+    .frame-strip { display:flex; gap:6px; overflow-x:auto; padding:4px 0 10px; }
+    .frame-strip .fs-item { position:relative; flex:0 0 auto; width:88px;
+      cursor:pointer; border:2px solid #2a2e39; border-radius:6px;
+      overflow:hidden; background:#12151c; }
+    .frame-strip .fs-item:hover { border-color:#4f8cff88; }
+    .frame-strip .fs-item.current { border-color:#4f8cff; }
+    .frame-strip .fs-item img { width:100%; height:48px; object-fit:cover;
+      display:block; }
+    .frame-strip .fs-cam { font-size:9px; color:#8b909a; padding:1px 4px;
+      display:block; white-space:nowrap; overflow:hidden;
+      text-overflow:ellipsis; }
+    .frame-strip .fs-done { position:absolute; top:2px; right:2px;
+      background:#36d399; color:#0c0e13; border-radius:50%; width:14px;
+      height:14px; font-size:10px; line-height:14px; text-align:center;
+      font-weight:700; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Real-Time CV Object Tracking - YOLO26</h1>
+      <div class="sub">Single-camera live analysis - people + vehicle counts,
+        activity index, 10-layer advanced analysis (heat, pose, plates, faces, line,
+        loitering, parking, gestures, body anomalies, paths) - local preview.</div>
+      <!-- Model quality scoreboard - computed on the server from the review
+           store, refreshed every 10 s. -->
+      <div class="sub model-metrics-line" id="model-metrics-line">
+        Model: loading...
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">
+      <div id="status" class="sub">local preview</div>
+    </div>
+  </header>
+
+  <!-- Tab bar: three workspaces (Analysis / Investigation / Reinforcement
+       learning). Sections stay in the DOM; tabs only control visibility. -->
+  <nav class="tabbar" id="tabbar">
+    <button data-tab-btn="analysis" class="on">Analysis</button>
+    <button data-tab-btn="investigation">Investigation</button>
+    <button data-tab-btn="rl">Reinforcement learning</button>
+  </nav>
+
+  <main data-active-tab="analysis">
+    <!-- Camera picker: dropdown of catalog cams + uploaded files, upload
+         button, start button. Above the single tile. -->
+    <div id="picker-bar" data-tab="analysis">
+      <label for="cam-picker" class="sub" style="flex-shrink:0">Camera:</label>
+      <select id="cam-picker"><option>loading...</option></select>
+      <button id="upload-btn" title="upload a local MP4/MKV file to analyze">Upload video (MP4/MKV)</button>
+      <input type="file" id="upload-input" accept="video/*" style="display:none">
+      <button id="start-cam" title="load the picked camera into the tile below">Start</button>
+      <div id="picker-status"></div>
+    </div>
+
+    <!-- Single tile: full viewport width, one camera at a time. Filled by app.js. -->
+    <div id="tile-single" data-tab="analysis"></div>
+
+    <!-- Investigation tab: every saved detection sample with its full frame.
+         Fed by /api/analysis/saved. -->
+    <div class="anomaly-wrap" id="gallery-section" data-tab="investigation">
+      <h2 id="gallery-title">Detections gallery - saved samples per layer</h2>
+      <div class="sub">Every detection you saved from the live strip, plus
+        the automatic proof samples - full frame, layer, camera and time.
+        Click an image for the original.</div>
+      <div id="gallery-wrap" style="display:grid;gap:10px;margin-top:10px;
+           grid-template-columns:repeat(auto-fill, minmax(210px, 1fr))"></div>
+    </div>
+
+    <!-- Frame-based review UI. Canvas shows the whole frame with every
+         detection overlaid; user clicks each box to verdict it, and can
+         draw NEW boxes for objects the model missed. -->
+    <div class="review-wrap" id="review-section" data-tab="rl">
+      <h2>Review detections - teach the system what it got wrong</h2>
+      <div class="sub">Full frame with all detections overlaid. Click a
+        box to cycle its verdict (grey then green correct then red wrong then grey),
+        or use <b>relabel</b> to fix a wrong class. Click "Add missing" and
+        drag on the canvas to mark an object the model failed to see. Every
+        verdict goes to <code>data/reviews.json</code>, hot-reloads the
+        analyzer's per-camera confidence within a few minutes, and feeds the
+        training exporter (<code>tools/export_labels.py</code>). The strip
+        below is a paced queue: the 5 frames the model is LEAST sure about,
+        then the next 5 when you finish, with a breather after 30.
+        Reviewed thumbnails re-open for amending.</div>
+      <div class="frame-strip" id="frame-strip" hidden></div>
+      <div class="review-frame-body">
+        <div class="canvas-wrap">
+          <div class="canvas-empty" id="canvas-empty">loading...</div>
+          <canvas id="review-canvas" width="800" height="450" hidden></canvas>
+          <div class="canvas-hint" id="canvas-hint"></div>
+        </div>
+        <div class="review-panel">
+          <div class="frame-meta">
+            <span class="frame-cam" id="frame-cam">-</span>
+            <span class="frame-path" id="frame-path"></span>
+          </div>
+          <div class="frame-boxes-summary" id="frame-boxes-summary">
+            <span class="fbs-box"><span class="dot" style="background:#8b909a"></span>
+              <b id="fbs-untouched">0</b> untouched</span>
+            <span class="fbs-box"><span class="dot" style="background:#36d399"></span>
+              <b id="fbs-correct">0</b> correct</span>
+            <span class="fbs-box"><span class="dot" style="background:#ef4444"></span>
+              <b id="fbs-wrong">0</b> wrong</span>
+            <span class="fbs-box"><span class="dot" style="background:#f0a35e"></span>
+              <b id="fbs-relabel">0</b> relabeled</span>
+            <span class="fbs-box"><span class="dot" style="background:#c084fc"></span>
+              <b id="fbs-object">0</b> object</span>
+            <span class="fbs-box"><span class="dot" style="background:#4f8cff"></span>
+              <b id="fbs-missed">0</b> missed</span>
+          </div>
+          <div class="frame-controls">
+            <button id="mode-verdict" class="mode-btn on">verdict mode</button>
+            <button id="mode-add" class="mode-btn">+ add missing</button>
+            <button id="mode-block" class="mode-btn"
+                    title="drag a box on the canvas to permanently blacklist this area for the class picked below">+ block area</button>
+            <button id="mode-relabel" class="mode-btn"
+                    title="click a box to change its class to the one picked below">relabel</button>
+            <select id="add-cls">
+              <option value="person">person</option>
+              <option value="car">car</option>
+              <option value="truck">truck</option>
+              <option value="bus">bus</option>
+              <option value="motorcycle">motorcycle</option>
+              <option value="bicycle">bicycle</option>
+              <option value="train">train</option>
+            </select>
+          </div>
+          <div class="review-note-wrap" id="note-wrap">
+            <textarea id="review-note" rows="2"
+                      placeholder="optional note about this frame"></textarea>
+          </div>
+          <div class="btn-row">
+            <button id="frame-save">save + next frame</button>
+            <button class="next" id="frame-skip">skip</button>
+            <button class="next" id="frame-undo" title="re-open the frame you just saved" disabled>undo last</button>
+          </div>
+          <div class="review-status" id="review-status"></div>
+          <div class="review-stats" id="review-stats">reviewed 0</div>
+          <div class="disk-usage" id="frames-usage" hidden>
+            <span>review frames on disk:</span>
+            <span><b id="frames-mb">0</b> MB - <b id="frames-count">0</b> /
+                  <span id="frames-cap">100</span> frames
+                  (every <span id="frames-every">5</span> bursts)</span>
+            <div class="bar" id="frames-bar"><i style="width:0%"></i></div>
+            <button id="frames-clear" title="delete stored review frames">clear all</button>
+          </div>
+          <div class="disk-usage" id="disk-usage" hidden>
+            <span>anomaly crops on disk:</span>
+            <span><b id="disk-used">0</b> / <span id="disk-cap">300</span> MB
+                  - <b id="disk-count">0</b> files</span>
+            <div class="bar" id="disk-bar"><i style="width:0%"></i></div>
+            <button id="disk-clear" title="delete every extracted crop from the disk cache">clear all</button>
+          </div>
+          <div class="disk-usage" id="live-usage" hidden>
+            <span>live samples pool:</span>
+            <span><b id="live-count">0</b> / <span id="live-cap">200</span> crops
+                  (~<b id="live-mb">0</b> MB - every <span id="live-every">5</span> bursts)</span>
+            <div class="bar" id="live-bar"><i style="width:0%"></i></div>
+            <button id="live-clear" title="delete the live-sample pool from disk">clear all</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ?v=N is a cache-buster: bump it whenever any JS file changes. -->
+  <script src="./app.js?v=1"></script>
+
+  <!-- Frame-based review UI. Canvas renders the whole frame with every
+       detection overlaid; user clicks each box to cycle its verdict,
+       relabels it to a different class, or switches into "add missing"
+       mode to drag out a new box for an object the model didn't detect. -->
+  <script>
+  (function initFrameReview() {
+    const $ = (id) => document.getElementById(id);
+    const canvas = $("review-canvas"), emptyEl = $("canvas-empty");
+    const hintEl = $("canvas-hint");
+    const camEl = $("frame-cam"), pathEl = $("frame-path");
+    const modeVerdictBtn = $("mode-verdict"), modeAddBtn = $("mode-add");
+    const addClsSel = $("add-cls");
+    const saveBtn = $("frame-save"), skipBtn = $("frame-skip"),
+          undoBtn = $("frame-undo");
+    let lastSavedPath = null;
+    const noteEl = $("review-note");
+    const statusEl = $("review-status"), statsEl = $("review-stats");
+    const framesWrap = $("frames-usage"), framesMb = $("frames-mb"),
+          framesCount = $("frames-count"), framesCap = $("frames-cap"),
+          framesEvery = $("frames-every"), framesBar = $("frames-bar"),
+          framesClearBtn = $("frames-clear");
+    const diskWrap = $("disk-usage"), diskUsed = $("disk-used"),
+          diskCap = $("disk-cap"), diskCount = $("disk-count"),
+          diskBar = $("disk-bar"), diskClearBtn = $("disk-clear");
+    const liveWrap = $("live-usage"), liveCount = $("live-count"),
+          liveCap = $("live-cap"), liveMb = $("live-mb"),
+          liveEvery = $("live-every"), liveBar = $("live-bar"),
+          liveClearBtn = $("live-clear");
+    const fbsU = $("fbs-untouched"), fbsC = $("fbs-correct"),
+          fbsW = $("fbs-wrong"), fbsM = $("fbs-missed"),
+          fbsR = $("fbs-relabel"), fbsO = $("fbs-object");
+    const stripEl = $("frame-strip");
+    if (!canvas) return;
+
+    const ctx = canvas.getContext("2d");
+
+    let current = null;
+    let img = null;
+    let boxVerdicts = {};
+    let missedBoxes = [];
+    let mode = "verdict";
+    let drag = null;
+    let scale = 1;
+
+    const clsColor = {
+      person: "#36d399", car: "#4f8cff", truck: "#f0a35e",
+      bus: "#f0a35e", motorcycle: "#ff9de0", bicycle: "#ff9de0",
+      train: "#c464ff",
+    };
+
+    const modeBlockBtn = $("mode-block");
+    const modeRelabelBtn = $("mode-relabel");
+    function setMode(m) {
+      mode = m;
+      modeVerdictBtn.classList.toggle("on", m === "verdict");
+      modeAddBtn.classList.toggle("on", m === "add");
+      if (modeBlockBtn) modeBlockBtn.classList.toggle("on", m === "block");
+      if (modeRelabelBtn) modeRelabelBtn.classList.toggle("on", m === "relabel");
+      hintEl.textContent =
+          m === "verdict" ? "click a box: grey then correct then wrong then grey"
+        : m === "add"     ? "drag on the canvas to draw a box around the missed object"
+        : m === "relabel" ? "click a box to set its class to the one picked in the dropdown (click again to undo)"
+        :                   "drag a box over a spot where the model keeps mis-firing this class";
+      canvas.style.cursor = (m === "verdict" || m === "relabel")
+          ? "pointer" : "crosshair";
+    }
+    modeVerdictBtn.addEventListener("click", () => setMode("verdict"));
+    modeAddBtn.addEventListener("click", () => setMode("add"));
+    if (modeBlockBtn) modeBlockBtn.addEventListener("click", () => setMode("block"));
+    if (modeRelabelBtn) modeRelabelBtn.addEventListener("click", () => setMode("relabel"));
+
+    function verdictColor(v) {
+      if (v && v.startsWith("relabel:")) return "#f0a35e";
+      if (v === "object") return "#c084fc";
+      return v === "correct" ? "#36d399" : v === "wrong" ? "#ef4444" : "#8b909a";
+    }
+
+    function renderSummary() {
+      if (!current) { fbsU.textContent = fbsC.textContent =
+          fbsW.textContent = fbsM.textContent = "0"; return; }
+      const boxes = current.boxes || [];
+      let c = 0, w = 0, rl = 0, ob = 0;
+      for (const b of boxes) {
+        const v = boxVerdicts[String(b.id)];
+        if (v === "correct") c++;
+        else if (v === "wrong") w++;
+        else if (v === "object") ob++;
+        else if (v && v.startsWith("relabel:")) rl++;
+      }
+      fbsC.textContent = c;
+      fbsW.textContent = w;
+      if (fbsO) fbsO.textContent = ob;
+      if (fbsR) fbsR.textContent = rl;
+      fbsU.textContent = boxes.length - c - w - rl - ob;
+      fbsM.textContent = missedBoxes.length;
+    }
+
+    function draw() {
+      if (!img || !current) return;
+      const targetW = Math.min(800, canvas.parentElement.clientWidth - 2);
+      const naturalW = current.frame_w || img.naturalWidth;
+      const naturalH = current.frame_h || img.naturalHeight;
+      scale = targetW / naturalW;
+      canvas.width = targetW;
+      canvas.height = Math.round(naturalH * scale);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+      for (const b of current.boxes || []) {
+        const [x1, y1, x2, y2] = b.box;
+        const v = boxVerdicts[String(b.id)];
+        const col = v ? verdictColor(v) : (clsColor[b.cls] || "#e7e9ee");
+        ctx.lineWidth = v === "wrong" || v === "correct" || v === "object" ? 3 : 2;
+        ctx.strokeStyle = col;
+        ctx.strokeRect(x1 * scale, y1 * scale,
+                       (x2 - x1) * scale, (y2 - y1) * scale);
+        const tag = !v ? ""
+                  : v.startsWith("relabel:") ? ` [-> ${v.split(":")[1]}]`
+                  : ` [${v}]`;
+        const label = `${b.cls} ${(b.conf * 100).toFixed(0)}%${tag}`;
+        ctx.font = "12px system-ui, sans-serif";
+        const tm = ctx.measureText(label);
+        const lx = x1 * scale, ly = Math.max(14, y1 * scale - 2);
+        ctx.fillStyle = col;
+        ctx.fillRect(lx, ly - 12, tm.width + 6, 14);
+        ctx.fillStyle = "#0c0e13";
+        ctx.fillText(label, lx + 3, ly - 1);
+      }
+
+      for (const m of missedBoxes) {
+        const [x1, y1, x2, y2] = m.box;
+        ctx.setLineDash([6, 3]);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "#4f8cff";
+        ctx.strokeRect(x1 * scale, y1 * scale,
+                       (x2 - x1) * scale, (y2 - y1) * scale);
+        ctx.setLineDash([]);
+        const label = `missed ${m.cls}`;
+        ctx.font = "12px system-ui, sans-serif";
+        const tm = ctx.measureText(label);
+        ctx.fillStyle = "#4f8cff";
+        ctx.fillRect(x1 * scale, y1 * scale - 12, tm.width + 6, 14);
+        ctx.fillStyle = "#0c0e13";
+        ctx.fillText(label, x1 * scale + 3, y1 * scale - 1);
+      }
+
+      if (drag) {
+        ctx.setLineDash([4, 4]);
+        ctx.lineWidth = 2; ctx.strokeStyle = "#4f8cff";
+        const dx = Math.min(drag.x0, drag.x1),
+              dy = Math.min(drag.y0, drag.y1),
+              dw = Math.abs(drag.x1 - drag.x0),
+              dh = Math.abs(drag.y1 - drag.y0);
+        ctx.strokeRect(dx, dy, dw, dh);
+        ctx.setLineDash([]);
+      }
+
+      renderSummary();
+    }
+
+    function eventCoords(e) {
+      const rect = canvas.getBoundingClientRect();
+      const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+      const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+      return { x, y };
+    }
+
+    function findBoxAt(cx, cy) {
+      let best = null;
+      let bestArea = Infinity;
+      for (const b of current.boxes || []) {
+        const [x1, y1, x2, y2] = b.box;
+        const cx1 = x1 * scale, cy1 = y1 * scale;
+        const cx2 = x2 * scale, cy2 = y2 * scale;
+        if (cx >= cx1 && cx <= cx2 && cy >= cy1 && cy <= cy2) {
+          const area = (cx2 - cx1) * (cy2 - cy1);
+          if (area < bestArea) { best = b; bestArea = area; }
+        }
+      }
+      return best;
+    }
+
+    canvas.addEventListener("click", (e) => {
+      if ((mode !== "verdict" && mode !== "relabel") || !current) return;
+      const { x, y } = eventCoords(e);
+      const b = findBoxAt(x, y);
+      if (!b) return;
+      const key = String(b.id);
+      const cur = boxVerdicts[key];
+      if (mode === "relabel") {
+        const target = `relabel:${addClsSel.value}`;
+        if (cur === target) delete boxVerdicts[key];
+        else boxVerdicts[key] = target;
+        draw();
+        return;
+      }
+      const next = (cur === undefined || cur.startsWith("relabel:")) ? "correct"
+                 : cur === "correct" ? "wrong"
+                 : cur === "wrong" ? "object" : undefined;
+      if (next) boxVerdicts[key] = next;
+      else delete boxVerdicts[key];
+      draw();
+    });
+
+    canvas.addEventListener("mousedown", (e) => {
+      if ((mode !== "add" && mode !== "block") || !current) return;
+      const { x, y } = eventCoords(e);
+      drag = { x0: x, y0: y, x1: x, y1: y };
+    });
+    canvas.addEventListener("mousemove", (e) => {
+      if (!drag) return;
+      const { x, y } = eventCoords(e);
+      drag.x1 = x; drag.y1 = y;
+      draw();
+    });
+    canvas.addEventListener("mouseup", async (e) => {
+      if (!drag) return;
+      const { x, y } = eventCoords(e);
+      drag.x1 = x; drag.y1 = y;
+      const dw = Math.abs(drag.x1 - drag.x0),
+            dh = Math.abs(drag.y1 - drag.y0);
+      if (dw > 6 && dh > 6) {
+        const x1 = Math.min(drag.x0, drag.x1) / scale;
+        const y1 = Math.min(drag.y0, drag.y1) / scale;
+        const x2 = Math.max(drag.x0, drag.x1) / scale;
+        const y2 = Math.max(drag.y0, drag.y1) / scale;
+        if (mode === "add") {
+          missedBoxes.push({ cls: addClsSel.value, box: [x1, y1, x2, y2] });
+        } else if (mode === "block") {
+          const nw = current.frame_w || 1, nh = current.frame_h || 1;
+          const nx1 = Math.max(0, Math.min(1, x1 / nw));
+          const ny1 = Math.max(0, Math.min(1, y1 / nh));
+          const nx2 = Math.max(0, Math.min(1, x2 / nw));
+          const ny2 = Math.max(0, Math.min(1, y2 / nh));
+          const polygon = [[nx1, ny1], [nx2, ny1], [nx2, ny2], [nx1, ny2]];
+          try {
+            const r = await fetch("/api/blacklist-add", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                cam_id: current.cam_id, cls: addClsSel.value, polygon,
+                reason: "user-marked from Review canvas",
+              }),
+            });
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+            statusEl.className = "review-status";
+            statusEl.textContent = data.created
+                ? `blocked: ${addClsSel.value} in this area of ${current.cam_id} will be ignored from now on`
+                : `already blocked: ${addClsSel.value} in this area of ${current.cam_id}`;
+          } catch (err) {
+            statusEl.className = "review-status err";
+            statusEl.textContent = `block failed: ${err.message}`;
+          }
+        }
+      }
+      drag = null;
+      draw();
+    });
+    canvas.addEventListener("mouseleave", () => { drag = null; draw(); });
+
+    function _resetEditor() {
+      statusEl.className = "review-status"; statusEl.textContent = "";
+      canvas.hidden = true;
+      emptyEl.textContent = "loading..."; emptyEl.style.display = "";
+      current = null; img = null;
+      boxVerdicts = {}; missedBoxes = []; drag = null;
+      noteEl.value = "";
+    }
+
+    function _showFrame(data) {
+      current = data;
+      camEl.textContent = data.cam_id || "-";
+      pathEl.textContent = data.frame_path;
+      if (data.existing) {
+        boxVerdicts = { ...(data.existing.box_verdicts || {}) };
+        missedBoxes = (data.existing.missed_detections || []).map(
+            (m) => ({ cls: m.cls, box: m.box.slice() }));
+        noteEl.value = data.existing.note || "";
+        statusEl.className = "review-status";
+        statusEl.textContent = "editing a previously-reviewed frame - saving overwrites the old verdicts";
+      }
+      markStripCurrent(data.frame_path);
+      img = new Image();
+      img.onload = () => {
+        emptyEl.style.display = "none";
+        canvas.hidden = false;
+        draw();
+      };
+      img.onerror = () => {
+        emptyEl.textContent = "frame image failed to load";
+      };
+      img.src = data.url;
+    }
+
+    async function loadNext() {
+      _resetEditor();
+      try {
+        const r = await fetch("/api/review-frame?scope=local",
+                              { cache: "no-store" });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+        if (data.done) {
+          camEl.textContent = "-"; pathEl.textContent = "";
+          markStripCurrent(null);
+          try {
+            const rr = await fetch("/api/review-frames-stats");
+            const s = rr.ok ? await rr.json() : null;
+            emptyEl.innerHTML = (s && s.count === 0)
+                ? "no frames in the pool yet.<br>" +
+                  "<span style=\"font-size:11px\">the analyzer saves one " +
+                  "frame every " + (s.every_n || 5) + " bursts to " +
+                  "<code>review_frames/</code></span>"
+                : "every stored frame has been reviewed.<br>" +
+                  "<span style=\"font-size:11px\">click a thumbnail above " +
+                  "to re-open one and amend its verdicts</span>";
+          } catch (_) {
+            emptyEl.textContent = "no frames available.";
+          }
+          renderSummary();
+          return;
+        }
+        _showFrame(data);
+      } catch (err) {
+        statusEl.className = "review-status err";
+        statusEl.textContent = `frame load failed: ${err.message}`;
+        emptyEl.textContent = "load failed";
+      }
+    }
+
+    async function loadSpecific(rel) {
+      _resetEditor();
+      try {
+        const r = await fetch(
+            `/api/review-frame?path=${encodeURIComponent(rel)}`,
+            { cache: "no-store" });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+        _showFrame(data);
+      } catch (err) {
+        statusEl.className = "review-status err";
+        statusEl.textContent = `frame load failed: ${err.message}`;
+        emptyEl.textContent = "load failed";
+      }
+    }
+
+    function markStripCurrent(rel) {
+      if (!stripEl) return;
+      for (const el of stripEl.querySelectorAll(".fs-item")) {
+        el.classList.toggle("current", rel !== null && el.dataset.rel === rel);
+      }
+    }
+
+    const QUEUE_SIZE = 5;
+    const REVIEWED_TAIL = 5;
+    const SESSION_CAP = 30;
+    let sessionSaved = 0;
+    let restOverride = false;
+
+    async function loadStrip() {
+      if (!stripEl) return;
+      try {
+        const r = await fetch("/api/review-frames-list?scope=local", { cache: "no-store" });
+        if (!r.ok) return;
+        const data = await r.json();
+        const frames = data.frames || [];
+        const queue = frames.filter((f) => !f.reviewed)
+            .sort((a, b) => (b.uncertainty ?? 0) - (a.uncertainty ?? 0)
+                            || b.frame_path.localeCompare(a.frame_path))
+            .slice(0, QUEUE_SIZE);
+        const done = frames.filter((f) => f.reviewed)
+            .sort((a, b) => b.frame_path.localeCompare(a.frame_path))
+            .slice(0, REVIEWED_TAIL);
+        const show = [...queue, ...done];
+        stripEl.hidden = show.length === 0;
+        stripEl.innerHTML = "";
+        for (const f of show) {
+          const item = document.createElement("div");
+          item.className = "fs-item";
+          item.dataset.rel = f.frame_path;
+          item.title = f.reviewed
+              ? `${f.cam_id} - reviewed, click to amend`
+              : `${f.cam_id} - model uncertainty ` +
+                `${Math.round((f.uncertainty ?? 0) * 100)}% - up next`;
+          item.innerHTML =
+              `<img loading="lazy" src="${f.url}" alt="">` +
+              (f.reviewed ? '<span class="fs-done">v</span>' : "") +
+              `<span class="fs-cam">${f.cam_id}</span>`;
+          item.addEventListener("click", () => loadSpecific(f.frame_path));
+          stripEl.appendChild(item);
+        }
+        if (current) markStripCurrent(current.frame_path);
+      } catch (_) { /* strip is a convenience */ }
+    }
+
+    function showRestScreen() {
+      canvas.hidden = true;
+      camEl.textContent = "-"; pathEl.textContent = "";
+      markStripCurrent(null);
+      emptyEl.innerHTML =
+          `you tagged <b>${sessionSaved}</b> frames this sitting - that is a ` +
+          `full session's worth of teaching.<br>` +
+          `<span style="font-size:11px">the pool keeps refilling from the ` +
+          `cameras; come back later, or </span>` +
+          `<button id="rest-continue" style="font-size:11px">keep going</button>`;
+      emptyEl.style.display = "";
+      document.getElementById("rest-continue").addEventListener("click", () => {
+        restOverride = true;
+        loadNext();
+      });
+    }
+
+    async function submit() {
+      if (!current) return;
+      statusEl.className = "review-status";
+      statusEl.textContent = "saving...";
+      try {
+        const body = {
+          frame_path:        current.frame_path,
+          cam_id:            current.cam_id,
+          box_verdicts:      boxVerdicts,
+          missed_detections: missedBoxes,
+          note:              noteEl.value.trim() || null,
+        };
+        const r = await fetch("/api/review-frame-submit", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+        lastSavedPath = current.frame_path;
+        undoBtn.disabled = false;
+        sessionSaved++;
+        await refreshStats();
+        await loadStrip();
+        if (sessionSaved >= SESSION_CAP && !restOverride) {
+          showRestScreen();
+          return;
+        }
+        await loadNext();
+        if (sessionSaved % QUEUE_SIZE === 0) {
+          statusEl.className = "review-status";
+          statusEl.textContent =
+              `batch of ${QUEUE_SIZE} done (${sessionSaved} this sitting) - ` +
+              `next ${QUEUE_SIZE} queued`;
+        }
+      } catch (err) {
+        statusEl.className = "review-status err";
+        statusEl.textContent = `save failed: ${err.message}`;
+      }
+    }
+    saveBtn.addEventListener("click", submit);
+    skipBtn.addEventListener("click", loadNext);
+    undoBtn.addEventListener("click", () => {
+      if (lastSavedPath) loadSpecific(lastSavedPath);
+    });
+
+    async function refreshStats() {
+      try {
+        const r = await fetch("/api/review-stats", { cache: "no-store" });
+        if (!r.ok) return;
+        const s = await r.json();
+        const boost = s.boost || {};
+        const tp = s.frame_tp || 0, fp = s.frame_fp || 0, fn = s.frame_fn || 0;
+        const line1 = `frames reviewed <b>${s.frames_reviewed || 0}</b> ` +
+            `(TP ${tp} - FP ${fp} - FN ${fn})`;
+        const line2 = (s.total_reviewed || 0) > 0
+            ? ` - legacy crop reviews: <b>${s.total_reviewed || 0}</b>` : "";
+        const line3 = boost.approved != null
+            ? ` - confidence tuned on <b>${boost.adjusted_cls || 0}</b> class(es)`
+            : "";
+        statsEl.innerHTML = line1 + line2 + line3;
+      } catch (_) { /* offline ok */ }
+    }
+
+    async function refreshDisk() {
+      try {
+        const r = await fetch("/api/review-frames-stats", { cache: "no-store" });
+        if (r.ok) {
+          const s = await r.json();
+          if (!s.error) {
+            framesWrap.hidden = false;
+            framesMb.textContent = (s.bytes / (1024 * 1024)).toFixed(1);
+            framesCount.textContent = s.count;
+            framesCap.textContent = s.cap_files;
+            framesEvery.textContent = s.every_n;
+            const pct = Math.max(0, Math.min(100, (s.count / s.cap_files) * 100));
+            framesBar.querySelector("i").style.width = pct + "%";
+            framesBar.classList.toggle("high", pct >= 60 && pct < 90);
+            framesBar.classList.toggle("full", pct >= 90);
+          }
+        }
+      } catch (_) { framesWrap.hidden = true; }
+      try {
+        const r = await fetch("/api/anomaly-crops-stats", { cache: "no-store" });
+        if (!r.ok) { diskWrap.hidden = true; }
+        else {
+          const s = await r.json();
+          if (s.error || s.cap_bytes == null) { diskWrap.hidden = true; }
+          else {
+            diskWrap.hidden = false;
+            diskUsed.textContent = (s.bytes / (1024 * 1024)).toFixed(1);
+            diskCap.textContent = s.cap_mb;
+            diskCount.textContent = s.count;
+            const pct = Math.max(0, Math.min(100, (s.bytes / s.cap_bytes) * 100));
+            diskBar.querySelector("i").style.width = pct + "%";
+            diskBar.classList.toggle("high", pct >= 60 && pct < 90);
+            diskBar.classList.toggle("full", pct >= 90);
+          }
+        }
+      } catch (_) { diskWrap.hidden = true; }
+      try {
+        const r = await fetch("/api/live-samples-stats", { cache: "no-store" });
+        if (!r.ok) { liveWrap.hidden = true; return; }
+        const s = await r.json();
+        if (s.error || s.cap_files == null) { liveWrap.hidden = true; return; }
+        liveWrap.hidden = false;
+        liveCount.textContent = s.count;
+        liveCap.textContent = s.cap_files;
+        liveMb.textContent = (s.bytes / (1024 * 1024)).toFixed(1);
+        liveEvery.textContent = s.every_n;
+        const pct = Math.max(0, Math.min(100, (s.count / s.cap_files) * 100));
+        liveBar.querySelector("i").style.width = pct + "%";
+        liveBar.classList.toggle("high", pct >= 60 && pct < 90);
+        liveBar.classList.toggle("full", pct >= 90);
+      } catch (_) { liveWrap.hidden = true; }
+    }
+
+    framesClearBtn.addEventListener("click", async () => {
+      if (!confirm("Delete every saved review frame?")) return;
+      try { await fetch("/api/review-frames-clear", { method: "POST" }); }
+      catch (_) {}
+      await refreshDisk(); await loadStrip(); await loadNext();
+    });
+    diskClearBtn.addEventListener("click", async () => {
+      if (!confirm("Delete every extracted anomaly crop?")) return;
+      try { await fetch("/api/anomaly-crops-clear", { method: "POST" }); }
+      catch (_) {}
+      await refreshDisk();
+    });
+    liveClearBtn.addEventListener("click", async () => {
+      if (!confirm("Delete every crop in the live-samples pool?")) return;
+      try { await fetch("/api/live-samples-clear", { method: "POST" }); }
+      catch (_) {}
+      await refreshDisk();
+    });
+
+    setMode("verdict");
+    refreshStats();
+    refreshDisk();
+    loadStrip();
+    loadNext();
+    setInterval(refreshDisk, 60000);
+    setInterval(loadStrip, 120000);
+    window.addEventListener("resize", () => { if (img && current) draw(); });
+  })();
+  </script>
+
+  <script>
+  // Model-quality header line - polled every 10 s from /api/model-metrics.
+  (function initModelMetrics() {
+    const el = document.getElementById("model-metrics-line");
+    if (!el) return;
+    async function refresh() {
+      try {
+        const r = await fetch("/api/model-metrics", { cache: "no-store" });
+        if (!r.ok) { el.classList.add("stale"); return; }
+        const data = await r.json();
+        el.classList.remove("stale");
+        el.textContent = data.header_line || "Model: -";
+      } catch (_) {
+        el.classList.add("stale");
+      }
+    }
+    refresh();
+    setInterval(refresh, 10000);
+  })();
+  </script>
+
+  <script>
+  (function initTabs() {
+    const main = document.querySelector("main");
+    const btns = [...document.querySelectorAll("[data-tab-btn]")];
+    if (!main || !btns.length) return;
+    function activate(tab) {
+      main.dataset.activeTab = tab;
+      for (const b of btns) b.classList.toggle("on", b.dataset.tabBtn === tab);
+      try { localStorage.setItem("dash-tab", tab); } catch (_) {}
+      requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
+    }
+    for (const b of btns) {
+      b.addEventListener("click", () => activate(b.dataset.tabBtn));
+    }
+    let saved = null;
+    try { saved = localStorage.getItem("dash-tab"); } catch (_) {}
+    if (saved && btns.some((b) => b.dataset.tabBtn === saved)) activate(saved);
+  })();
+  </script>
+</body>
+</html>
