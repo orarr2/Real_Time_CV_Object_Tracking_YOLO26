@@ -175,8 +175,10 @@ def load_model(weights: str = "yolov8s.pt"):
 
     model = YOLO(weights)
     try:
-        from app import adapters
-        adapters.apply_current(model, expected_base=weights)
+        # adapters was removed with Category C; the loader is kept in a
+        # try/except so a future re-introduction reads its file without
+        # touching this call site.
+        raise ImportError("adapters removed with Category C")
     except Exception as e:
         print(f"load_model: adapter overlay skipped ({type(e).__name__}: {e})")
     return model
@@ -395,17 +397,47 @@ def resolve_webcamera24(page_url: str) -> str:
     raise RuntimeError("webcamera24: no tvkur/YouTube player found on page")
 
 
+_SCREEN_CAPTURE_FALLBACK = (
+    os.environ.get("SCREEN_CAPTURE_FALLBACK") or "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
 def _resolve_uncached(cam: dict) -> str:
     kind = cam.get("kind", "hls")
+    # Local uploaded files carry `path` instead of `url`; hand the path
+    # straight through so OpenCV VideoCapture opens it as a file source.
+    if kind == "local_file":
+        return cam.get("path") or cam.get("url") or ""
     url = cam["url"]
     if kind == "hls":
         return url
     if kind == "youtube":
-        return resolve_youtube(url)
+        try:
+            return resolve_youtube(url)
+        except Exception as e:
+            # yt-dlp is often blocked at the IP level on operator laptops
+            # (YouTube bot check ignores even a fresh cookies file - see
+            # AUDIT_REPORT.md section 7). When SCREEN_CAPTURE_FALLBACK=1
+            # the resolver hands back a sentinel URL that grab_frame
+            # recognises and captures from the operator's screen instead
+            # of the network. The operator keeps the browser open with
+            # the iframe player visible; ImageGrab handles the rest.
+            if _SCREEN_CAPTURE_FALLBACK:
+                from app.screen_capture import SCREEN_CAPTURE_SENTINEL
+                print(f"youtube resolve failed for {cam.get('id', url)}, "
+                      f"falling back to screen capture: {e}")
+                return SCREEN_CAPTURE_SENTINEL
+            raise
     if kind == "skyline":
         return resolve_skyline(cam.get("page", url))
     if kind == "webcamera24":
         return resolve_webcamera24(cam.get("page", url))
+    if kind == "screen":
+        # Explicit screen-capture camera. Register a `screen` camera in
+        # cameras.py with `url: "screen://primary"` and (optionally) a
+        # SCREEN_CAPTURE_BBOX env var to bound the capture region.
+        from app.screen_capture import SCREEN_CAPTURE_SENTINEL
+        return SCREEN_CAPTURE_SENTINEL
     raise ValueError(f"unknown camera kind: {kind!r}")
 
 
@@ -419,6 +451,8 @@ def resolve_stream(cam: dict, now: float | None = None) -> str:
     kind = cam.get("kind", "hls")
     if kind == "hls":
         return cam["url"]
+    if kind == "local_file":
+        return cam.get("path") or cam.get("url") or ""
     cam_id = cam.get("id")
     now = time.time() if now is None else now
     if cam_id:
@@ -685,7 +719,18 @@ def grab_frame(stream_url: str):
     """Open an HLS/RTSP stream, read a single frame (BGR ndarray), close. None on failure.
 
     For hosts that need referer/origin headers, route via _grab_via_segment.
+    The special sentinel `screen://primary` (set by resolve_uncached when
+    SCREEN_CAPTURE_FALLBACK=1 and yt-dlp is blocked) short-circuits to
+    the local screen grab.
     """
+    if stream_url and stream_url.startswith("screen://"):
+        from app.screen_capture import capture, parse_bbox_env, get_region
+        if get_region() is None:
+            bbox = parse_bbox_env()
+            if bbox is not None:
+                from app.screen_capture import set_region
+                set_region(bbox)
+        return capture()
     for host, headers in HEADER_HOSTS.items():
         if host in stream_url:
             try:
@@ -1520,6 +1565,54 @@ def box_iou(a: dict | None, b: dict | None) -> float:
     area_b = max(0.0, b["x2"] - b["x1"]) * max(0.0, b["y2"] - b["y1"])
     union = area_a + area_b - inter
     return inter / union if union > 0 else 0.0
+
+
+def _box_diagonal(box: dict) -> float:
+    """Length of the box's diagonal in pixels."""
+    import math
+    w = max(0.0, box["x2"] - box["x1"])
+    h = max(0.0, box["y2"] - box["y1"])
+    return math.hypot(w, h)
+
+
+def _point_to_box_distance(px: float, py: float, box: dict) -> float:
+    """Shortest distance from a point to the nearest edge of a box; 0 if
+    the point is inside."""
+    dx = max(box["x1"] - px, 0.0, px - box["x2"])
+    dy = max(box["y1"] - py, 0.0, py - box["y2"])
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def associate_by_iou_or_distance(anchor: dict, item: dict,
+                                 iou_floor: float = 0.02,
+                                 distance_frac: float = 0.6) -> bool:
+    """True when `item` belongs to `anchor` under a two-stage geometric
+    test - the pattern adapted from Nawaf-Rayhan585's PPE compliance
+    monitor. Reason IoU alone fails for accessories (bag, phone, helmet)
+    is they usually protrude past the person's box; a distance fallback
+    keyed off the anchor's diagonal catches those without dragging in
+    far-away detections.
+
+    * `anchor` - the "owner" box (person, vehicle).
+    * `item`   - the box we want to check ownership of (bag, PPE, plate).
+    * `iou_floor` - IoU threshold; 0.02 is very permissive on purpose,
+      the distance test still gates far-away items.
+    * `distance_frac` - max center-to-anchor-edge distance, as a fraction
+      of the anchor's diagonal. 0.6 = "within one radius of the anchor
+      edge".
+
+    Both boxes use the same {x1,y1,x2,y2} contract as `box_iou`.
+    """
+    if not anchor or not item:
+        return False
+    if box_iou(anchor, item) >= iou_floor:
+        return True
+    icx = (item["x1"] + item["x2"]) / 2.0
+    icy = (item["y1"] + item["y2"]) / 2.0
+    diag = _box_diagonal(anchor)
+    if diag <= 0:
+        return False
+    return _point_to_box_distance(icx, icy, anchor) <= distance_frac * diag
 
 
 _BOX_COLORS = {

@@ -411,14 +411,13 @@ def analyze_window(cam_id: str, model,
     attach_neighbor_stats(tracks, stats)
 
     # Behavior verdict per individual - kinematic rules always, posture
-    # rules when this track's boxes carry keypoints.
-    from app.behavior_labels import label_track
+    # rules when this track's boxes carry keypoints. behavior_labels was
+    # removed with Category C; the layer now returns only kinematic stats
+    # (speed / neighbours) and gestures, no running/erratic/fall labels.
     from app.gestures import detect_gestures
     for tr, row in zip(tracks, stats):
         kps_seq = [b.get("kps") for b in tr.boxes]
         has_kps = any(kps_seq)
-        row.update(label_track(row, frames[0].shape,
-                               kps_seq if has_kps else None))
         row["gestures"] = detect_gestures(kps_seq) if has_kps else []
 
     faces_list: list[dict] = []

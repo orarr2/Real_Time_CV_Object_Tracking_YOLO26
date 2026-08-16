@@ -41,7 +41,10 @@ class MockYOLO:
     def __init__(self, dets):
         self._all = dets
 
-    def predict(self, frame, conf, classes, verbose=False, imgsz=None):
+    def predict(self, frame, conf, classes, verbose=False, imgsz=None,
+                **kwargs):
+        # **kwargs so detect_core's newer signature (agnostic_nms, etc.)
+        # passes through cleanly - the mock does not care about NMS mode.
         keep = [d for d in self._all
                 if d[1] >= conf and int(d[0]) in classes]
         return [_MockResult(keep)]

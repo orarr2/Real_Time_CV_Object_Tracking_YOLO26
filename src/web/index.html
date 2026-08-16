@@ -100,12 +100,24 @@
                      font-size: 12.5px; }
     .analysis-stop:hover { background: #24324a; }
 
-    /* Full-width video, capped at 70vh so the whole tile fits on screen. */
-    .video-wrap { position: relative; width: 100%;
-                  max-height: 70vh; aspect-ratio: 16/9;
-                  background: #0c0e13; border-radius: 8px; overflow: hidden;
-                  margin: 0 auto; }
+    /* Video wrap keeps a true 16:9 aspect ratio (matches every catalog
+       stream and lets YouTube's own quality selector go all the way up
+       to 4K when the source supports it). The `max-width` derives from
+       the dynamic viewport height budget so that on a wide-but-short
+       monitor the wrap shrinks WIDTH to preserve the ratio - a smaller
+       centered video, letter-boxed by the tile background on the sides,
+       is the correct trade-off vs. cropping content out of view. */
+    .video-wrap {
+        position: relative;
+        aspect-ratio: 16 / 9;
+        height: min(92dvh, calc(100dvh - 200px));
+        max-width: 100%;
+        width: auto;
+        background: #0c0e13; border-radius: 8px; overflow: hidden;
+        margin: 0 auto;
+    }
     .video-wrap iframe, .video-wrap img, .video-wrap video {
+        position: absolute; inset: 0;
         width: 100%; height: 100%; border: 0; object-fit: contain;
         background: #0c0e13; display: block;
     }

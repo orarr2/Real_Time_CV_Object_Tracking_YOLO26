@@ -1,49 +1,41 @@
-# Python
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-.ipynb_checkpoints/
+# Model weights - large binary files, not source. Ship separately or
+# download from Ultralytics on first run.
+*.pt
+*_openvino_model/
+yolo_fire.pt
 
-# Editor / IDE
+# Executed notebook artifacts (run real_time_cv.ipynb yourself)
+real_time_cv_executed.ipynb
+
+# Session-scoped runtime state (not source)
+src/data/uploads/*.mp4
+src/data/uploads/*.mkv
+src/data/uploads/*.mov
+src/data/uploads/*.avi
+src/data/uploads/*.webm
+src/web/snapshots/model_view/*.jsonl
+src/web/snapshots/live_samples/
+src/web/snapshots/review_frames/
+src/web/snapshots/model_view/
+src/web/snapshots/anomaly_crops/
+src/web/local_grid.json
+src/data/resolve_cache.json
+src/data/*.json
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# OS / editor
+.DS_Store
+Thumbs.db
 .vscode/
 .idea/
 
-# Model weights (kept in the repo - remove these lines if you want to gitignore weights instead)
-# *.pt
-# *.onnx
-# *_openvino_model/
+# Environments
+.venv/
+venv/
+env/
 
-# Collected data / outputs
-data/
-*.csv
-*.mp4
-*.mkv
-*.mov
-*.avi
-*.webm
-*.jpg
-*.jpeg
-*.png
-!src/docs/images/*.jpg
-!src/docs/images/*.png
-
-# Dashboard runtime snapshots
-**/web/snapshots/**/*.jpg
-**/web/snapshots/**/*.json
-!**/web/snapshots/**/.gitkeep
-
-# Uploaded video files (per-user, potentially sensitive)
-src/data/uploads/*
-!src/data/uploads/.gitkeep
-
-# Env / secrets
-.env
-.env.local
-.env.*.local
-
-# Local editor / assistant tooling
-.claude/
-
-# Test cache
-.pytest_cache/
+# Logs
+*.log

@@ -63,18 +63,52 @@ L_HIP, R_HIP = 11, 12
 L_KNEE, R_KNEE = 13, 14
 L_ANKLE, R_ANKLE = 15, 16
 
-# Bones, grouped so the overlay reads at a glance even on a small crop:
-# head/neck green, arms blue, torso magenta, legs orange (BGR).
+# Bones + keypoints, grouped so a person carries four clearly separated
+# colors at once (2026-08-16): head/face cluster yellow (nose-eyes-ears),
+# arms cyan (shoulders-elbows-wrists), torso trunk green (shoulder-hip
+# rectangle), legs magenta (hips-knees-ankles). Colors are BGR (cv2
+# convention). Head cluster includes the intra-face edges (nose-eyes,
+# eyes-ears) so a well-lit face draws a small polygon rather than one
+# green stem down to the shoulders.
+L_EYE, R_EYE = 1, 2
+L_EAR, R_EAR = 3, 4
+_HEAD_KPS = (NOSE, L_EYE, R_EYE, L_EAR, R_EAR)
+_ARM_KPS = (L_SHOULDER, R_SHOULDER, L_ELBOW, R_ELBOW, L_WRIST, R_WRIST)
+_TORSO_KPS: tuple = ()   # torso shares its keypoints with arms/legs anchors
+_LEG_KPS = (L_HIP, R_HIP, L_KNEE, R_KNEE, L_ANKLE, R_ANKLE)
+
+_YELLOW = (0, 255, 255)
+_CYAN = (255, 255, 0)
+_GREEN = (0, 255, 0)
+_MAGENTA = (255, 0, 255)
+
 _BONE_GROUPS = (
-    (((NOSE, L_SHOULDER), (NOSE, R_SHOULDER)),               (80, 175, 76)),
+    # Head/face cluster (yellow): nose-eyes-ears geometry.
+    (((NOSE, L_EYE), (NOSE, R_EYE), (L_EYE, L_EAR), (R_EYE, R_EAR)),
+     _YELLOW),
+    # Arms (cyan): shoulder-elbow-wrist chains, both sides.
     (((L_SHOULDER, L_ELBOW), (L_ELBOW, L_WRIST),
-      (R_SHOULDER, R_ELBOW), (R_ELBOW, R_WRIST)),            (246, 130, 60)),
-    (((L_SHOULDER, R_SHOULDER), (L_SHOULDER, L_HIP),
-      (R_SHOULDER, R_HIP), (L_HIP, R_HIP)),                  (200, 60, 200)),
+      (R_SHOULDER, R_ELBOW), (R_ELBOW, R_WRIST)),
+     _CYAN),
+    # Torso trunk (green): shoulder-shoulder, shoulder-hip, hip-hip.
+    # The neck bones (nose->shoulders) also live here so the head cluster
+    # stays isolated to the face rather than dangling down the chest.
+    (((NOSE, L_SHOULDER), (NOSE, R_SHOULDER),
+      (L_SHOULDER, R_SHOULDER), (L_SHOULDER, L_HIP),
+      (R_SHOULDER, R_HIP), (L_HIP, R_HIP)),
+     _GREEN),
+    # Legs (magenta): hip-knee-ankle chains, both sides.
     (((L_HIP, L_KNEE), (L_KNEE, L_ANKLE),
-      (R_HIP, R_KNEE), (R_KNEE, R_ANKLE)),                   (0, 160, 255)),
+      (R_HIP, R_KNEE), (R_KNEE, R_ANKLE)),
+     _MAGENTA),
 )
 SKELETON = tuple(edge for edges, _color in _BONE_GROUPS for edge in edges)
+
+# Per-keypoint color map (index -> BGR) so keypoint dots also inherit the
+# region color instead of one flat white.
+_KP_COLORS: dict = {i: _YELLOW for i in _HEAD_KPS}
+_KP_COLORS.update({i: _CYAN for i in _ARM_KPS})
+_KP_COLORS.update({i: _MAGENTA for i in _LEG_KPS})
 
 _model = None
 # Lazy-load guard: two live sessions hitting the first pose tick at the
@@ -198,8 +232,12 @@ def draw_skeleton(img, boxes: list[dict], min_conf: float = KP_MIN_CONF):
                     continue
                 cv2.line(img, (int(xi), int(yi)), (int(xj), int(yj)),
                          color, 2, cv2.LINE_AA)
-        for x, y, c in kps:
+        # Keypoint dots: colored by body region (2026-08-16). White dots
+        # on top of colored bones gave one flat "confetti" look that lost
+        # the region separation; per-region dots let each of the four
+        # colors read on both bones AND joints.
+        for idx, (x, y, c) in enumerate(kps):
             if c >= min_conf:
-                cv2.circle(img, (int(x), int(y)), 3, (255, 255, 255), -1,
-                           cv2.LINE_AA)
+                col = _KP_COLORS.get(idx, (255, 255, 255))
+                cv2.circle(img, (int(x), int(y)), 3, col, -1, cv2.LINE_AA)
     return img

@@ -111,9 +111,13 @@ def test_first_tick_heat_weight_uses_pacing_target(monkeypatch):
     sess._last_cross_ts = {}
     sess._last_tick = None
     # Skip the hot-reload path on this fixture-only tick: pretend the
-    # next check is far in the future so _maybe_reload_line short-circuits.
+    # next check is far in the future so _maybe_reload_line and
+    # _maybe_reload_zones short-circuit.
     sess._line_mtime = None
     sess._next_line_check = 1e18
+    sess._zones_mtime = None
+    sess._next_zones_check = 1e18
+    sess.zones = []
     frame = np.zeros((*SHAPE, 3), dtype=np.uint8)    # crossing-snap needs the array
     boxes = [_box(320 - 15, 180 - 60)]               # foot at frame center
     sess._accumulate(frame, boxes, now=100.0)
@@ -128,8 +132,8 @@ def test_first_tick_heat_weight_uses_pacing_target(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_resolve_cam_registry():
-    cam = la.resolve_cam("taksim_yeni")
-    assert cam["id"] == "taksim_yeni"
+    cam = la.resolve_cam("th_green_mango")
+    assert cam["id"] == "th_green_mango"
     assert cam["url"].startswith("http")
 
 
@@ -205,22 +209,30 @@ def test_gestures_layer_honest_when_empty():
 
 
 def test_body_layer_flags_only_anomalies():
+    # 2026-08-16 semantic: EVERY person gets a neutral grey box so the
+    # operator still sees where people are; alert-grade flags overlay a
+    # thicker red box + banner on top. Walker gets a grey outline (not
+    # blank), faller gets both grey base + red highlight.
     img = np.zeros((*SHAPE, 3), dtype=np.uint8)
     walker = _box(100, 100); walker["track_id"] = 1
     faller = _box(300, 100); faller["track_id"] = 2
     stats = {1: {"id": 1, "label": "walking", "alert": False},
              2: {"id": 2, "label": "fall_suspect", "alert": True}}
     out = la.draw_body_layer(img.copy(), [walker, faller], stats)
-    assert out[100:170, 90:140].sum() == 0           # walker undrawn
-    assert out[100:170, 295:340].sum() > 0           # faller boxed
-    assert out[10:60, 10:240].sum() > 0              # status HUD panel
+    walker_pixels = out[100:170, 90:140]
+    faller_pixels = out[100:170, 295:340]
+    assert walker_pixels.sum() > 0                   # walker: neutral grey box
+    # Walker is NEUTRAL grey (140,140,140) - no red channel dominance.
+    assert walker_pixels[..., 2].max() < 200         # walker not red-flagged
+    assert faller_pixels.sum() > walker_pixels.sum() # faller more heavily drawn
+    assert faller_pixels[..., 2].max() > 180         # faller box in red
     assert out[10:40, 200:460, 2].max() > 150        # red ALERT banner
-    # No alert-grade flag -> HUD yes, banner no.
+    # No alert-grade flag -> banner absent, walker still shown neutrally.
     calm = la.draw_body_layer(img.copy(), [walker],
                               {1: {"id": 1, "label": "walking",
                                    "alert": False}})
-    assert calm[10:60, 10:240].sum() > 0             # HUD still tallies
-    assert calm[10:40, 300:460].sum() == 0           # no banner
+    assert calm[100:170, 90:140].sum() > 0           # walker grey box drawn
+    assert calm[10:40, 300:460].sum() == 0           # no red banner
 
 
 def test_line_layer_draws_line_and_counts():
@@ -231,17 +243,20 @@ def test_line_layer_draws_line_and_counts():
     assert out[:30].sum() > 0                        # the caption
 
 
-def test_heat_layer_is_full_heat_vision():
-    # fix 3: picking heat transforms the WHOLE picture (thermal-style
-    # colormap), dwell pushes its zones hotter still.
+def test_heat_layer_is_signal_overlay():
+    # Restored pre-fix-3 behaviour: empty street stays a photo (only the
+    # caption band changes), a banked-dwell zone paints TURBO on top via
+    # heatmap.overlay. This is the operator's preferred style.
     img = np.full((*SHAPE, 3), 40, dtype=np.uint8)
     grid = [[0.0] * la.GRID_W for _ in range(la.GRID_H)]
     out = la.draw_heat_layer(img.copy(), grid)
     assert out.shape == img.shape
-    assert not (out[CAP_H:] == img[CAP_H:]).all()    # colormap everywhere
+    # No dwell -> pixels below the caption band are untouched.
+    assert (out[CAP_H:] == img[CAP_H:]).all()
     grid[la.GRID_H // 2][la.GRID_W // 2] = 50.0
     out2 = la.draw_heat_layer(img.copy(), grid)
-    assert not (out2[CAP_H:] == out[CAP_H:]).all()   # dwell zone runs hotter
+    # Dwell zone -> body of the frame differs from the flat original.
+    assert not (out2[CAP_H:] == img[CAP_H:]).all()
 
 
 # ---------------------------------------------------------------------------
@@ -278,64 +293,61 @@ def stub_manager(monkeypatch):
 
 def test_manager_rejects_unknown_layer(stub_manager):
     with pytest.raises(ValueError):
-        stub_manager.start("taksim_yeni", "xray", model=None)
+        stub_manager.start("th_green_mango", "xray", model=None)
 
 
 def test_manager_switch_keeps_session(stub_manager):
-    a = stub_manager.start("taksim_yeni", "heat", model=None)
+    a = stub_manager.start("th_green_mango", "heat", model=None)
     assert a["switched"] is False and a["active"] == 1
-    b = stub_manager.start("taksim_yeni", "gestures", model=None)
+    b = stub_manager.start("th_green_mango", "gestures", model=None)
     assert b["switched"] is True and b["active"] == 1
-    fr = stub_manager.frame("taksim_yeni")
+    fr = stub_manager.frame("th_green_mango")
     assert fr["layer"] == "gestures" and fr["jpeg"] is None
 
 
 def test_manager_caps_sessions_and_reaps(stub_manager):
-    cams = ["taksim_yeni", "beyazit_meydan_yeni", "sarachane_yeni",
-            "sultanahmet_1_yeni"]
-    for c in cams:
-        stub_manager.start(c, "paths", model=None)
+    # Single-camera design (MAX_SESSIONS = 1): starting one is fine,
+    # starting a second on a DIFFERENT camera raises BusyError. When the
+    # first dies its slot frees on the next start, and the reaped
+    # session's crash reason surfaces ONCE on the follow-up frame poll.
+    stub_manager.start("th_green_mango", "paths", model=None)
     with pytest.raises(la.BusyError):
-        stub_manager.start("konya_hukumet", "paths", model=None)
-    # One session dies -> its slot frees on the next start. The reaped
-    # session's crash reason is served ONCE on the next frame poll (as
-    # {"error": "..."}) so the client can render "why did it stop"; the
-    # follow-up poll returns None because the reason has been drained.
-    stub_manager._sessions["taksim_yeni"]._alive = False
-    ok = stub_manager.start("konya_hukumet", "paths", model=None)
-    assert ok["active"] == 4
-    ended = stub_manager.frame("taksim_yeni")
+        stub_manager.start("th_nanai_road", "paths", model=None)
+    stub_manager._sessions["th_green_mango"]._alive = False
+    ok = stub_manager.start("th_nanai_road", "paths", model=None)
+    assert ok["active"] == la.MAX_SESSIONS
+    ended = stub_manager.frame("th_green_mango")
     assert ended == {"error": "session ended unexpectedly"}
-    assert stub_manager.frame("taksim_yeni") is None
+    assert stub_manager.frame("th_green_mango") is None
 
 
 def test_manager_surfaces_run_error_to_next_poll(stub_manager):
     # A session that died with a specific reason should hand that reason
     # to the very next frame poll instead of being silently reaped as 404.
-    stub_manager.start("taksim_yeni", "paths", model=None)
-    s = stub_manager._sessions["taksim_yeni"]
+    stub_manager.start("th_green_mango", "paths", model=None)
+    s = stub_manager._sessions["th_green_mango"]
     s.err = "RuntimeError: pose model failed to load"
     s._alive = False
-    fr = stub_manager.frame("taksim_yeni")
+    fr = stub_manager.frame("th_green_mango")
     assert fr == {"error": "RuntimeError: pose model failed to load"}
-    assert stub_manager.frame("taksim_yeni") is None
+    assert stub_manager.frame("th_green_mango") is None
 
 
 def test_manager_stop_clears_pending_error(stub_manager):
     # An operator-initiated stop is not a crash; any pending error from a
     # previous incarnation must not resurface on the next start.
-    stub_manager.start("taksim_yeni", "paths", model=None)
-    s = stub_manager._sessions["taksim_yeni"]
+    stub_manager.start("th_green_mango", "paths", model=None)
+    s = stub_manager._sessions["th_green_mango"]
     s.err = "boom"; s._alive = False
-    stub_manager.frame("taksim_yeni")               # drains once
-    stub_manager.start("taksim_yeni", "paths", model=None)   # fresh restart
-    fr = stub_manager.frame("taksim_yeni")
+    stub_manager.frame("th_green_mango")               # drains once
+    stub_manager.start("th_green_mango", "paths", model=None)   # fresh restart
+    fr = stub_manager.frame("th_green_mango")
     assert fr.get("error") is None
     assert fr["layer"] == "paths"
 
 
 def test_manager_stop(stub_manager):
-    stub_manager.start("taksim_yeni", "line", model=None)
-    assert stub_manager.stop("taksim_yeni") is True
-    assert stub_manager.stop("taksim_yeni") is False
-    assert stub_manager.frame("taksim_yeni") is None
+    stub_manager.start("th_green_mango", "line", model=None)
+    assert stub_manager.stop("th_green_mango") is True
+    assert stub_manager.stop("th_green_mango") is False
+    assert stub_manager.frame("th_green_mango") is None

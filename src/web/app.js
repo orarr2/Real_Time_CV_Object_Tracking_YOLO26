@@ -232,8 +232,31 @@ function buildVideoInto(st, cam) {
                      preload="auto"
                      controlsList="nodownload noremoteplayback"
                      style="width:100%;height:100%;object-fit:contain;background:#0c0e13"></video>`;
-  } else if (cam.hls || cam.active_hls) {
-    const hlsUrl = cam.hls || cam.active_hls;
+  } else if (cam.kind === "youtube") {
+    // yt-dlp may be blocked (YouTube bot check on Chrome 127+ hosts): even
+    // when the backend cannot resolve an HLS the operator still needs to
+    // SEE the stream. Embed the YouTube iframe directly - the player runs
+    // in its own context, does not depend on yt-dlp, and the canvas
+    // overlay above still receives whatever boxes the backend can produce.
+    const m = String(cam.url || "").match(
+        /(?:youtube\.com\/(?:watch\?v=|embed\/|live\/)|youtu\.be\/)([\w-]{11})/);
+    const vid = m ? m[1] : "";
+    if (vid) {
+      // `vq=hd2160` is legacy but some players still honour it; the
+      // authoritative quality push happens after load via postMessage.
+      markup = `<iframe data-youtube="${vid}"
+                        src="https://www.youtube.com/embed/${vid}?autoplay=1&mute=1&playsinline=1&controls=1&enablejsapi=1&vq=hd2160&rel=0&modestbranding=1"
+                        allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+                        allowfullscreen
+                        style="border:0;background:#0c0e13"></iframe>`;
+    } else {
+      markup = `<div class="video-fallback">
+                  YouTube URL missing a video id - check cameras.py.
+                </div>`;
+    }
+  } else if (cam.hls || cam.active_hls
+             || (cam.kind === "hls" && cam.url)) {
+    const hlsUrl = cam.hls || cam.active_hls || cam.url;
     markup = `<video data-hls="${hlsUrl}" autoplay muted playsinline
                      controls controlsList="nodownload noremoteplayback"
                      preload="auto"></video>`;
@@ -246,6 +269,19 @@ function buildVideoInto(st, cam) {
   st.videoWrap.insertAdjacentHTML("afterbegin", markup);
   const video = st.videoWrap.querySelector("video[data-hls]");
   if (video) attachHls(st, video);
+  const yt = st.videoWrap.querySelector("iframe[data-youtube]");
+  if (yt) {
+    yt.addEventListener("load", () => {
+      // Ask YouTube for the highest available quality; the player picks
+      // the top the bandwidth allows (4K when the source has it).
+      try {
+        yt.contentWindow.postMessage(
+          JSON.stringify({event: "command",
+                          func: "setPlaybackQuality",
+                          args: ["hd2160"]}), "*");
+      } catch (_) { /* cross-origin postMessage may reject silently */ }
+    }, { once: true });
+  }
 }
 
 function attachHls(st, video) {
@@ -299,16 +335,15 @@ const ANALYSIS_LAYER_DEFS = [
   ["heat",     "Heat signature"],
   ["paths",    "Paths & speeds"],
   ["pose",     "Pose & skeleton"],
-  ["gestures", "Static postures"],
+  ["gestures", "Hand gestures"],
   ["body",     "Body anomalies"],
   ["faces",    "Face detection"],
   ["line",     "Line crossing"],
-  ["loiter",   "Zone & loitering"],
+  ["fire",     "Fire detection"],
   ["parking",  "Parking occupancy"],
   ["plates",   "License plates (LPR)"],
 ];
 const DRAWABLE_LAYERS = { line: "Draw line",
-                          loiter: "Draw zones",
                           parking: "Draw spots" };
 const ANALYSIS_POLL_MS = 500;
 
@@ -448,6 +483,7 @@ analysisPanel.querySelector("[data-an-run]").addEventListener("click",
     errEl.style.color = "#f87171";
     errEl.textContent = "";
     try {
+      await _postScreenCaptureBbox(st);
       const r = await fetch(
         `/api/analysis/start?cam=${encodeURIComponent(cam)}` +
         `&layer=${encodeURIComponent(picked.value)}`,
@@ -558,6 +594,7 @@ function beginTileAnalysis(st, cam, layer) {
     evTimer: setInterval(() => pollAnalysisEvents(st), 2500),
     timer: setInterval(() => pollAnalysisFrame(st), ANALYSIS_POLL_MS),
     videoStateTimer: setInterval(() => _syncAnalysisBgVisibility(st), 500),
+    bboxSyncTimer: setInterval(() => _postScreenCaptureBbox(st), 2500),
   };
   st.analysis.bg.style.display = "block";
   st.analysis.canvas.style.display = "none";
@@ -710,7 +747,7 @@ async function renderGallery() {
       live detection chip, or let the proof collector fill this up.</div>`;
     return;
   }
-  const order = ["plates", "line", "loiter", "parking", "gestures",
+  const order = ["plates", "line", "fire", "parking", "gestures",
                  "body", "pose", "faces", "heat", "paths"];
   items.sort((a, b) => order.indexOf(a.layer) - order.indexOf(b.layer)
                        || (b.ts || 0) - (a.ts || 0));
@@ -744,7 +781,34 @@ function _analysisDrawLoop(st, a) {
   if (a.canvas.style.display === "none") return;
   const buf = a.tickBuf;
   if (!buf.length) return;
-  let merged = buf[buf.length - 1];
+  // Layer-switching placeholder (2026-08-16): the server keeps publishing
+  // the OLD layer for a few ticks after the client asks for a new one
+  // (Analyze picker sends the switch, the current in-flight tick still
+  // uses the old layer). Drawing the old layer's overlay while the LIVE
+  // tag says "switching to X..." misled the operator ("why are skeletons
+  // showing when I picked paths"). When the server's layer disagrees
+  // with what the client wants, clear the canvas and paint a small
+  // placeholder instead of the stale layer's geometry.
+  const latestTick = buf[buf.length - 1];
+  if (latestTick && a.layer && latestTick.layer
+      && latestTick.layer !== a.layer) {
+    const ctx = a.canvas.getContext("2d");
+    const rect = a.canvas.parentElement.getBoundingClientRect();
+    const cw = Math.max(1, Math.round(rect.width));
+    const ch = Math.max(1, Math.round(rect.height));
+    if (a.canvas.width !== cw)  a.canvas.width = cw;
+    if (a.canvas.height !== ch) a.canvas.height = ch;
+    ctx.clearRect(0, 0, cw, ch);
+    ctx.font = "14px system-ui, sans-serif";
+    const msg = `switching to ${_layerLabel[a.layer] || a.layer}...`;
+    const tw = ctx.measureText(msg).width + 20;
+    ctx.fillStyle = "rgba(15,23,42,0.75)";
+    ctx.fillRect((cw - tw) / 2, ch / 2 - 16, tw, 32);
+    ctx.fillStyle = "#f8fafc";
+    ctx.fillText(msg, (cw - tw) / 2 + 10, ch / 2 + 4);
+    return;
+  }
+  let merged = latestTick;
   const hls = st.currentHlsInstance;
   const pd = hls && hls.playingDate;
   let vidT = null;
@@ -760,7 +824,9 @@ function _analysisDrawLoop(st, a) {
       vidT = a._vPin.at + (video.currentTime - a._vPin.ct);
     }
   }
-  const EXTRAP_MAX_S = 1.5;
+  const EXTRAP_MAX_S = 3.0;         // was 1.5; wider window keeps boxes on
+                                    // screen when the backend tick is slow
+                                    // on CPU-only hosts (5-10 s per tick)
   const EXTRAP_MAX_DIAG = 0.5;
   const _capShift = (b, dt) => {
     if (b.coast || !dt || dt <= 0) return _shiftBox(b, 0);
@@ -833,17 +899,59 @@ function _shiftBox(b, dt) {
   return o;
 }
 
+// Screen-capture fallback: when yt-dlp is blocked, the backend reads pixels
+// off the operator's primary display via PIL.ImageGrab. Frames come back in
+// full-screen coords, but the canvas overlay scales to the video iframe, so
+// we tell the backend to crop to the iframe's screen-space rectangle. Then
+// frame_w/frame_h == iframe_w/iframe_h and boxes land on real people.
+async function _postScreenCaptureBbox(st) {
+  try {
+    if (!st || !st.videoWrap) return;
+    const el = st.videoWrap.querySelector("iframe[data-youtube]")
+      || st.videoWrap.querySelector("iframe")
+      || st.videoWrap.querySelector("video");
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    if (!r || r.width < 40 || r.height < 40) return;
+    const dpr = window.devicePixelRatio || 1;
+    const sx = (window.screenX !== undefined
+                ? window.screenX : window.screenLeft) || 0;
+    const sy = (window.screenY !== undefined
+                ? window.screenY : window.screenTop) || 0;
+    const chromeTop = Math.max(0, window.outerHeight - window.innerHeight);
+    const bbox = {
+      x1: Math.round((sx + r.left) * dpr),
+      y1: Math.round((sy + chromeTop + r.top) * dpr),
+      x2: Math.round((sx + r.right) * dpr),
+      y2: Math.round((sy + chromeTop + r.bottom) * dpr),
+    };
+    await fetch("/api/screen-capture/bbox", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(bbox),
+    });
+  } catch (_) { /* best-effort - fallback keeps working full-screen */ }
+}
+
 function _syncAnalysisBgVisibility(st) {
   const a = st.analysis;
   if (!a || !a.bg) return;
   let playing = false;
-  const v = st.videoWrap.querySelector("video");
-  if (v && !v.paused && !v.ended && v.readyState >= 2) {
-    const t = v.currentTime;
-    playing = (a._lastVidT !== undefined) && (t > a._lastVidT + 0.05);
-    a._lastVidT = t;
+  // YouTube iframe (yt-dlp-independent playback): assume it's playing so
+  // the backend JPEG fallback stays hidden and the canvas overlay draws
+  // boxes on top of the iframe video the operator actually sees.
+  const yt = st.videoWrap.querySelector("iframe[data-youtube]");
+  if (yt) {
+    playing = true;
   } else {
-    a._lastVidT = undefined;
+    const v = st.videoWrap.querySelector("video");
+    if (v && !v.paused && !v.ended && v.readyState >= 2) {
+      const t = v.currentTime;
+      playing = (a._lastVidT !== undefined) && (t > a._lastVidT + 0.05);
+      a._lastVidT = t;
+    } else {
+      a._lastVidT = undefined;
+    }
   }
   const want = playing ? "none" : "block";
   if (a.bg.style.display !== want) {
@@ -890,20 +998,58 @@ async function pollAnalysisFrame(st) {
         a.tickBuf.push(d);
         if (a.tickBuf.length > 24) a.tickBuf.shift();
         if (a.bg && a.bg.style.display !== "none") _refreshAnalysisBg(a);
-        if (d.layer === "loiter" && Array.isArray(d.zones)) {
-          a._loiterAlerted = a._loiterAlerted || new Set();
-          for (const z of d.zones) {
-            if (z.alert && !a._loiterAlerted.has(z.name)) {
-              a._loiterAlerted.add(z.name);
-              showCrossToast(`loitering in ${z.name} - ${z.max_dwell}s`);
+        // Feed the tile's activity + anomaly pills from the live-analysis
+        // tick so the "-/10" placeholder becomes a real reading whenever a
+        // session is running. Previously only pollLocalModelView (which
+        // reads model_view/<cam>.json - only the notebook Section 7 writes
+        // that file) updated these, so a standalone-dashboard operator
+        // stared at "-/10" forever.
+        try {
+          _updateLocalTileBadges(a.cam, {
+            counts: { person: d.person, vehicles: d.vehicles },
+            at: d.at,
+            dark: d.dark,
+            obstructed: d.obstructed,
+          });
+        } catch (_) { /* pills are decorative - never break the poll */ }
+        if (d.layer === "fire" && d.fire) {
+          const confirmed = !!d.fire.confirmed;
+          const prev = !!a._fireConfirmed;
+          if (confirmed && !prev) {
+            const n = (d.fire.hits || []).length;
+            showCrossToast(`FIRE DETECTED - ${n} region(s)`);
+            const t = st.tile;
+            if (t) {
+              t.style.outline = "3px solid #f97316";
+              setTimeout(() => { t.style.outline = ""; }, 3000);
+            }
+          }
+          a._fireConfirmed = confirmed;
+        }
+        if (d.layer === "parking" && Array.isArray(d.spots)) {
+          // Occupancy-transition toasts + tile flash. Loiter alerts fire
+          // on sustained presence; parking fires on the SPOT'S state
+          // flipping (empty <-> filled), so a spot that frees up (which
+          // is often the operationally interesting event: "space #3 just
+          // opened") gets its own toast instead of only living in the
+          // event feed.
+          a._parkState = a._parkState || {};
+          for (const z of d.spots) {
+            const cur = !!z.occupied;
+            const prev = a._parkState[z.name];
+            if (prev !== undefined && prev !== cur) {
+              const msg = cur
+                ? `${z.name} occupied${z.cls ? " (" + z.cls + ")" : ""}`
+                : `${z.name} just freed up`;
+              showCrossToast(msg);
               const t = st.tile;
               if (t) {
-                t.style.outline = "3px solid #ef4444";
-                setTimeout(() => { t.style.outline = ""; }, 2500);
+                const col = cur ? "#ef4444" : "#22c55e";
+                t.style.outline = `3px solid ${col}`;
+                setTimeout(() => { t.style.outline = ""; }, 2000);
               }
-            } else if (!z.alert) {
-              a._loiterAlerted.delete(z.name);
             }
+            a._parkState[z.name] = cur;
           }
         }
       }
@@ -966,33 +1112,76 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
   const sx = cw / fw, sy = ch / fh;
 
   if (d.layer === "heat" && Array.isArray(d.heat) && d.heat.length) {
+    // Faithful port of the original heatmap.overlay() (Turkey-era, the
+    // one the operator explicitly wants back): raw dwell grid -> sqrt
+    // tone curve -> bilinear resize -> Gaussian blur -> TURBO colormap
+    // -> signal-modulated alpha blend. The empty street stays a photo;
+    // only where activity accumulated does color bloom in.
+    //
+    // 2026-08-16 tuning per operator ("peak stays ~0 in d.heat"):
+    //   * peak = plain max, not 99th percentile - the 99th tail cut the
+    //     ONE cell that had the fresh foot point on a first-few-ticks
+    //     dwell (with 1-2 non-zero cells the 99th index rounded to 0);
+    //   * raw floor lowered from 0.02 to 0.005 so a lone cell one tick
+    //     after a person arrived still lights up faintly (was silent);
+    //   * alpha eased so tiny early accumulation is visible sooner.
     let hc = canvas._heatCache;
     if (!hc || hc.seq !== d.seq || hc.cw !== cw || hc.ch !== ch) {
+      const gh = d.heat.length, gw = d.heat[0].length;
+      const src = document.createElement("canvas");
+      src.width = gw; src.height = gh;
+      const sctx = src.getContext("2d");
+      let peak = 0;
+      for (const row of d.heat)
+        for (const v of row) if (v > peak) peak = v;
       const off = document.createElement("canvas");
       off.width = cw; off.height = ch;
       const octx = off.getContext("2d");
-      const gh = d.heat.length, gw = d.heat[0].length;
-      const cellW = cw / gw, cellH = ch / gh;
-      const vals = [];
-      for (const row of d.heat) for (const v of row) if (v > 0) vals.push(v);
-      vals.sort((a, b) => a - b);
-      const peak = vals.length
-        ? vals[Math.min(vals.length - 1, Math.floor(vals.length * 0.99))]
-        : 0;
       if (peak > 0) {
+        // 1) Paint the grid at native resolution using the TURBO
+        //    colormap over a sqrt-normalized dwell value (one busy
+        //    corner does not crush the walking routes into invisibility).
         for (let gy = 0; gy < gh; gy++) {
           for (let gx = 0; gx < gw; gx++) {
-            const v = Math.min(1, d.heat[gy][gx] / peak);
-            if (v < 0.05) continue;
-            const alpha = Math.min(0.65, v * 0.7);
-            octx.fillStyle = _heatColor(v, alpha);
-            octx.fillRect(gx * cellW, gy * cellH, cellW + 1, cellH + 1);
+            const raw = d.heat[gy][gx] / peak;
+            if (raw < 0.005) continue;
+            const v = Math.sqrt(Math.min(1, raw));
+            const alpha = Math.min(1, 0.35 + 0.65 * v);
+            const [rr, gg, bb] = _turboRGB(v);
+            sctx.fillStyle = `rgba(${rr},${gg},${bb},${alpha})`;
+            sctx.fillRect(gx, gy, 1, 1);
           }
         }
+        // 2) Upscale bilinear + heavy Gaussian blur to the full frame
+        //    so the coarse grid melts into smooth blooms.
+        octx.imageSmoothingEnabled = true;
+        octx.imageSmoothingQuality = "high";
+        octx.filter = `blur(${Math.max(10, Math.round(cw / 60))}px)`;
+        octx.drawImage(src, 0, 0, cw, ch);
+        octx.filter = "none";
       }
-      hc = canvas._heatCache = { seq: d.seq, cw, ch, off };
+      hc = canvas._heatCache = { seq: d.seq, cw, ch, off, peak };
     }
-    ctx.drawImage(hc.off, 0, 0);
+    // 3) Signal-modulated alpha blend onto the live iframe canvas. The
+    //    heat canvas already carries per-pixel alpha (blur preserves it),
+    //    so a straight drawImage with a moderate globalAlpha is enough.
+    if (hc.peak > 0) {
+      const prevAlpha = ctx.globalAlpha;
+      ctx.globalAlpha = 0.72;
+      ctx.drawImage(hc.off, 0, 0);
+      ctx.globalAlpha = prevAlpha;
+    } else {
+      // Empty grid: reassure the operator this layer is running by
+      // painting a small "warming up..." caption instead of a blank
+      // canvas that reads as broken.
+      ctx.font = "12px system-ui, sans-serif";
+      const t = "heat signature - accumulating dwell (nothing banked yet)";
+      const tw = ctx.measureText(t).width + 14;
+      ctx.fillStyle = "rgba(15,23,42,0.8)";
+      ctx.fillRect(8, ch - 30, tw, 22);
+      ctx.fillStyle = "#fbbf24";
+      ctx.fillText(t, 14, ch - 14);
+    }
   }
 
   if (d.layer === "line" && Array.isArray(d.line) && d.line.length === 2) {
@@ -1007,22 +1196,47 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
     ctx.lineTo(lx(d.line[1]), ly(d.line[1]));
     ctx.stroke();
     ctx.setLineDash([]);
+    // Big top-center IN/OUT readout (2026-08-16): the counter used to sit
+    // small in the bottom-left, hidden behind YouTube's playback UI. Now
+    // rendered at 48pt at the top of the frame, IN in glowing green and
+    // OUT in glowing red - operator reads it at a glance no matter where
+    // the line itself was drawn.
     if (d.cross) {
-      ctx.fillStyle = "rgba(15,23,42,0.85)";
-      ctx.fillRect(8, ch - 30, 150, 22);
-      ctx.fillStyle = "#f8fafc";
-      ctx.font = "12px system-ui, sans-serif";
-      ctx.fillText(`in: ${d.cross.in || 0}   out: ${d.cross.out || 0}`,
-                   14, ch - 14);
+      const nIn = d.cross.in || 0, nOut = d.cross.out || 0;
+      const fontPx = Math.max(24, Math.min(48, Math.round(cw / 22)));
+      ctx.save();
+      ctx.font = `800 ${fontPx}px system-ui, -apple-system, sans-serif`;
+      const txtIn = `IN ${nIn}`;
+      const txtSep = "   ";
+      const txtOut = `OUT ${nOut}`;
+      const wIn = ctx.measureText(txtIn).width;
+      const wSep = ctx.measureText(txtSep).width;
+      const wOut = ctx.measureText(txtOut).width;
+      const totalW = wIn + wSep + wOut;
+      const x0 = Math.max(8, (cw - totalW) / 2);
+      const y0 = 12 + fontPx;
+      // Dark backdrop so both colors read on bright frames too.
+      ctx.fillStyle = "rgba(15,23,42,0.72)";
+      ctx.fillRect(x0 - 18, 4,
+                   Math.min(cw - 4, totalW + 36),
+                   fontPx + 22);
+      // Glow (blur+wide stroke) + solid fill on top.
+      ctx.shadowColor = "rgba(34,197,94,0.85)";
+      ctx.shadowBlur = 18;
+      ctx.fillStyle = "#22c55e";
+      ctx.fillText(txtIn, x0, y0);
+      ctx.shadowColor = "rgba(239,68,68,0.85)";
+      ctx.fillStyle = "#ef4444";
+      ctx.fillText(txtOut, x0 + wIn + wSep, y0);
+      ctx.restore();
     }
   }
 
-  if ((d.layer === "loiter" && Array.isArray(d.zones))
-      || (d.layer === "parking" && Array.isArray(d.spots))) {
-    const entries = d.layer === "loiter" ? d.zones : d.spots;
+  if (d.layer === "parking" && Array.isArray(d.spots)) {
+    const entries = d.spots;
     ctx.font = "12px system-ui, sans-serif";
     for (const z of entries) {
-      const hot = d.layer === "loiter" ? z.alert : z.occupied;
+      const hot = z.occupied;
       const col = hot ? "239,68,68" : "74,222,128";
       ctx.beginPath();
       ctx.moveTo(z.points[0][0] * cw, z.points[0][1] * ch);
@@ -1034,9 +1248,7 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
       ctx.lineWidth = 2;
       ctx.strokeStyle = `rgba(${col},0.95)`;
       ctx.stroke();
-      const label = d.layer === "loiter"
-        ? `${z.name}: ${z.count} inside - max ${z.max_dwell}s`
-        : `${z.name}: ${z.occupied ? (z.cls || "occupied") : "free"}`;
+      const label = `${z.name}: ${z.occupied ? (z.cls || "occupied") : "free"}`;
       const zx = z.points[0][0] * cw, zy = z.points[0][1] * ch;
       const tw = ctx.measureText(label).width + 8;
       ctx.fillStyle = "rgba(15,23,42,0.85)";
@@ -1044,7 +1256,7 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
       ctx.fillStyle = "#f8fafc";
       ctx.fillText(label, zx + 4, Math.max(12, zy - 4));
     }
-    if (d.layer === "parking" && d.parking) {
+    if (d.parking) {
       const t = `parking: ${d.parking.occupied}/${d.parking.total} occupied`;
       ctx.fillStyle = "rgba(15,23,42,0.85)";
       ctx.fillRect(8, ch - 30, ctx.measureText(t).width + 14, 22);
@@ -1052,7 +1264,48 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
       ctx.fillText(t, 14, ch - 14);
     }
     if (!entries.length) {
-      const t = "no zones drawn yet - press the Draw button";
+      // Parking on a camera with no spots is not a mistake to fix, it is
+      // just "this camera is not a lot" - a friendlier hint (2026-08-16
+      // per operator: Green Mango was showing the generic "no zones"
+      // string when parking was picked, which read as broken).
+      const t = "no parking spots configured for this camera - draw spots to enable";
+      ctx.fillStyle = "rgba(15,23,42,0.85)";
+      ctx.fillRect(8, 8, ctx.measureText(t).width + 14, 22);
+      ctx.fillStyle = "#fbbf24";
+      ctx.fillText(t, 14, 23);
+    }
+  }
+
+  if (d.layer === "fire" && d.fire) {
+    const hits = Array.isArray(d.fire.hits) ? d.fire.hits : [];
+    ctx.font = "600 13px system-ui, sans-serif";
+    for (const h of hits) {
+      const x = h.x1 * sx, y = h.y1 * sy;
+      const w = (h.x2 - h.x1) * sx, hh = (h.y2 - h.y1) * sy;
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(249,115,22,0.95)";
+      ctx.strokeRect(x, y, w, hh);
+      const label = `${h.cls || "fire"} ${(h.conf || 0).toFixed(2)}`;
+      const tw = ctx.measureText(label).width + 8;
+      ctx.fillStyle = "rgba(15,23,42,0.85)";
+      ctx.fillRect(x, Math.max(0, y - 16), tw, 16);
+      ctx.fillStyle = "#fde68a";
+      ctx.fillText(label, x + 4, Math.max(12, y - 4));
+    }
+    if (d.fire.confirmed) {
+      const banner = "FIRE DETECTED";
+      const fontPx = Math.max(20, Math.min(40, Math.round(cw / 26)));
+      ctx.save();
+      ctx.font = `800 ${fontPx}px system-ui, sans-serif`;
+      const tw = ctx.measureText(banner).width + 24;
+      const bx = Math.max(8, (cw - tw) / 2);
+      ctx.fillStyle = "rgba(239,68,68,0.92)";
+      ctx.fillRect(bx, 8, tw, fontPx + 16);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(banner, bx + 12, 8 + fontPx + 4);
+      ctx.restore();
+    } else if (d.fire.err) {
+      const t = d.fire.err;
       ctx.fillStyle = "rgba(15,23,42,0.85)";
       ctx.fillRect(8, 8, ctx.measureText(t).width + 14, 22);
       ctx.fillStyle = "#fbbf24";
@@ -1061,17 +1314,32 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
   }
 
   if (d.layer === "paths") {
+    // Trails behind each tracked mover + a small dot at the current
+    // centroid. Trail line width is 3 (was 2) so it reads on a busy
+    // street scene, and each trail carries a small end-cap dot so a
+    // one-tick track without enough points to draw a line still shows.
     for (const b of d.boxes || []) {
-      if (!Array.isArray(b.trail) || b.trail.length < 2) continue;
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = _trailColor(b.tid || 0);
+      const trail = Array.isArray(b.trail) ? b.trail : [];
+      const color = _trailColor(b.tid || 0);
+      const cxNow = ((b.x1 + b.x2) / 2 + (b.vx || 0) * dtExtra) * sx;
+      const cyNow = ((b.y1 + b.y2) / 2 + (b.vy || 0) * dtExtra) * sy;
+      if (trail.length >= 2) {
+        ctx.lineWidth = 3;
+        ctx.lineCap = "round";
+        ctx.strokeStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(trail[0][0] * sx, trail[0][1] * sy);
+        for (let i = 1; i < trail.length; i++)
+          ctx.lineTo(trail[i][0] * sx, trail[i][1] * sy);
+        ctx.lineTo(cxNow, cyNow);
+        ctx.stroke();
+      }
+      // Head dot at current position: makes the newest end of the
+      // trail obvious and gives brand-new one-tick tracks a mark.
+      ctx.fillStyle = color;
       ctx.beginPath();
-      ctx.moveTo(b.trail[0][0] * sx, b.trail[0][1] * sy);
-      for (let i = 1; i < b.trail.length; i++)
-        ctx.lineTo(b.trail[i][0] * sx, b.trail[i][1] * sy);
-      ctx.lineTo((b.x1 + b.x2) / 2 * sx + (b.vx || 0) * dtExtra * sx,
-                 (b.y1 + b.y2) / 2 * sy + (b.vy || 0) * dtExtra * sy);
-      ctx.stroke();
+      ctx.arc(cxNow, cyNow, 4, 0, Math.PI * 2);
+      ctx.fill();
     }
   }
 
@@ -1109,19 +1377,44 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
     let color = b.cls === "person"
       ? "rgba(74,222,128,0.95)" : "rgba(251,146,60,0.95)";
     let label = `${b.cls} ${Math.round((b.conf || 0) * 100)}%`;
-    if (d.layer === "paths" && b.tier)
+    if (d.layer === "paths" && b.tier) {
+      // Speed number next to the tier chip (2026-08-16). BL/s is
+      // perspective-honest (body-lengths per second); the raw px/s is
+      // shown too so operators who prefer a pixel rate have it.
       label += ` - ${b.tier}`;
+      if (b.speed_blps != null) {
+        label += ` ${b.speed_blps.toFixed(1)} BL/s`;
+        if (b.speed_pxs) label += ` (${b.speed_pxs} px/s)`;
+      }
+    }
     if (d.layer === "gestures" && b.gestures)
       label = `#${b.tid} ${b.gestures.join("+")}`;
     if (d.layer === "body" && b.flag) {
       color = b.alert ? "rgba(239,68,68,0.95)" : "rgba(234,140,8,0.95)";
-      label = `#${b.tid} ${String(b.flag).toUpperCase()}`
+      const flagTxt = String(b.flag).toUpperCase().replace(/_/g, " ");
+      label = `#${b.tid} ${flagTxt}`
         + (b.flags ? " " + b.flags.join("+") : "");
       if (b.alert) alertOn = true;
-    }
-    if (d.layer === "loiter" && b.dwell != null) {
-      label += ` - ${b.dwell}s in zone`;
-      if ((d.zones || []).some((z) => z.alert)) color = "rgba(239,68,68,0.95)";
+      // Sudden-motion (wrist/ankle burst): draw a red HALO around the
+      // person so a snatch/punch/kick is unmistakable at a glance -
+      // matches draw_body_layer in the backend JPEG fallback.
+      if (b.flag === "sudden_motion") {
+        const cx = (b.x1 + b.x2) / 2 * sx + ox * sx;
+        const cy = (b.y1 + b.y2) / 2 * sy + oy * sy;
+        const rHalo = Math.max(w, h) * 0.75;
+        ctx.save();
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = "rgba(239,68,68,0.9)";
+        ctx.beginPath();
+        ctx.arc(cx, cy, rHalo, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = "rgba(120,20,20,0.9)";
+        ctx.beginPath();
+        ctx.arc(cx, cy, rHalo + 4, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
     }
     if (d.layer === "plates" && b.plate) {
       color = "rgba(74,222,128,0.95)";
@@ -1167,26 +1460,55 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
   }
 }
 
-const _SKELETON_EDGES = [
-  [5, 7], [7, 9], [6, 8], [8, 10], [5, 6], [5, 11], [6, 12],
-  [11, 12], [11, 13], [13, 15], [12, 14], [14, 16],
-  [0, 5], [0, 6],
+// Skeleton in four region colors (2026-08-16, matches app/pose.py's
+// _BONE_GROUPS): head/face cluster yellow (nose+eyes+ears), arms cyan
+// (shoulders-elbows-wrists), torso trunk green, legs magenta. Each
+// person carries four clearly separated colors at once.
+const _SKELETON_GROUPS = [
+  // head/face
+  { color: "rgba(250,204,21,0.95)",
+    edges: [[0, 1], [0, 2], [1, 3], [2, 4]] },
+  // arms
+  { color: "rgba(34,211,238,0.95)",
+    edges: [[5, 7], [7, 9], [6, 8], [8, 10]] },
+  // torso trunk (incl. neck to shoulders)
+  { color: "rgba(74,222,128,0.95)",
+    edges: [[0, 5], [0, 6], [5, 6], [5, 11], [6, 12], [11, 12]] },
+  // legs
+  { color: "rgba(232,121,249,0.95)",
+    edges: [[11, 13], [13, 15], [12, 14], [14, 16]] },
 ];
+// Keypoint index -> region color for the joint dots (kept in sync with
+// _SKELETON_GROUPS above; head kps 0-4, arms 5-10, legs 11-16).
+const _KP_COLOR = {
+  0: "rgba(250,204,21,0.95)", 1: "rgba(250,204,21,0.95)",
+  2: "rgba(250,204,21,0.95)", 3: "rgba(250,204,21,0.95)",
+  4: "rgba(250,204,21,0.95)",
+  5: "rgba(34,211,238,0.95)", 6: "rgba(34,211,238,0.95)",
+  7: "rgba(34,211,238,0.95)", 8: "rgba(34,211,238,0.95)",
+  9: "rgba(34,211,238,0.95)", 10: "rgba(34,211,238,0.95)",
+  11: "rgba(232,121,249,0.95)", 12: "rgba(232,121,249,0.95)",
+  13: "rgba(232,121,249,0.95)", 14: "rgba(232,121,249,0.95)",
+  15: "rgba(232,121,249,0.95)", 16: "rgba(232,121,249,0.95)",
+};
 
 function _drawSkeleton(ctx, kps, sx, sy, ox, oy) {
   ctx.lineWidth = 2;
-  ctx.strokeStyle = "rgba(96,165,250,0.95)";
-  for (const [a, b] of _SKELETON_EDGES) {
-    const p = kps[a], q = kps[b];
-    if (!p || !q || p[2] < 0.3 || q[2] < 0.3) continue;
-    ctx.beginPath();
-    ctx.moveTo((p[0] + ox) * sx, (p[1] + oy) * sy);
-    ctx.lineTo((q[0] + ox) * sx, (q[1] + oy) * sy);
-    ctx.stroke();
+  for (const grp of _SKELETON_GROUPS) {
+    ctx.strokeStyle = grp.color;
+    for (const [a, b] of grp.edges) {
+      const p = kps[a], q = kps[b];
+      if (!p || !q || p[2] < 0.3 || q[2] < 0.3) continue;
+      ctx.beginPath();
+      ctx.moveTo((p[0] + ox) * sx, (p[1] + oy) * sy);
+      ctx.lineTo((q[0] + ox) * sx, (q[1] + oy) * sy);
+      ctx.stroke();
+    }
   }
-  ctx.fillStyle = "rgba(219,234,254,0.95)";
-  for (const k of kps) {
+  for (let i = 0; i < kps.length; i++) {
+    const k = kps[i];
     if (!k || k[2] < 0.3) continue;
+    ctx.fillStyle = _KP_COLOR[i] || "rgba(219,234,254,0.95)";
     ctx.beginPath();
     ctx.arc((k[0] + ox) * sx, (k[1] + oy) * sy, 2.5, 0, Math.PI * 2);
     ctx.fill();
@@ -1218,10 +1540,41 @@ async function _refreshAnalysisBg(a) {
 }
 
 function _heatColor(v, alpha) {
-  const r = Math.round(255 * Math.min(1, v * 2));
-  const g = Math.round(255 * Math.min(1, (1 - Math.abs(v - 0.5) * 2)));
-  const b = Math.round(255 * Math.max(0, 1 - v * 2));
+  const [r, g, b] = _turboRGB(v);
   return `rgba(${r},${g},${b},${alpha})`;
+}
+
+// TURBO colormap sampled at 10 stops (Google's improved-rainbow palette,
+// same one cv2.COLORMAP_TURBO produces). Restores the exact look the
+// original Turkey-era heatmap.overlay() had - dark blue at the cold end,
+// glowing red at the hot end, smooth through the middle without the
+// perceptual quirks of rainbow.
+function _turboRGB(v) {
+  const stops = [
+    [0.00,  48,  18,  59],
+    [0.11,  68,  84, 210],
+    [0.22,  65, 155, 250],
+    [0.34,  33, 208, 218],
+    [0.46,  60, 236, 138],
+    [0.58, 156, 246,  67],
+    [0.70, 226, 213,  38],
+    [0.82, 249, 145,  20],
+    [0.94, 235,  76,  14],
+    [1.00, 144,  12,  20],
+  ];
+  const x = Math.max(0, Math.min(1, v));
+  for (let i = 0; i < stops.length - 1; i++) {
+    const a = stops[i], b = stops[i + 1];
+    if (x <= b[0]) {
+      const t = (x - a[0]) / Math.max(1e-6, b[0] - a[0]);
+      return [
+        Math.round(a[1] + (b[1] - a[1]) * t),
+        Math.round(a[2] + (b[2] - a[2]) * t),
+        Math.round(a[3] + (b[3] - a[3]) * t),
+      ];
+    }
+  }
+  return [144, 12, 20];
 }
 
 function stopTileAnalysis(st) {
@@ -1229,6 +1582,7 @@ function stopTileAnalysis(st) {
   if (!a) return;
   clearInterval(a.timer);
   if (a.videoStateTimer) clearInterval(a.videoStateTimer);
+  if (a.bboxSyncTimer) clearInterval(a.bboxSyncTimer);
   if (a.evTimer) clearInterval(a.evTimer);
   if (a.evStrip) a.evStrip.remove();
   if (a.lastBgUrl) URL.revokeObjectURL(a.lastBgUrl);

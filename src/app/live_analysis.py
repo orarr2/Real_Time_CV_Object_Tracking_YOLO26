@@ -43,10 +43,17 @@ from app.heatmap import GRID_H, GRID_W
 
 _SRC_ROOT = Path(__file__).resolve().parent.parent
 
-# The seven analysis layers an operator can run live. "line" is the
-# threshold-crossing layer added in fix 2.
+# The analysis layers an operator can run live. "line" is the threshold-
+# crossing layer added in fix 2. "fire" (2026-08-16) replaces the removed
+# "loiter" layer: the notebook's anomaly-detection already covers dwell-
+# in-a-zone (Turkey heritage: >5 min presence -> cropped save), so the
+# live-dashboard loiter card was redundant. Fire detection uses a
+# dedicated single-class YOLO placed at src/yolo_fire.pt (see
+# load_fire_model below) and gracefully reports "model not loaded" when
+# the weights file is absent, so a running session is never killed by a
+# missing optional model.
 LIVE_LAYERS = ("paths", "pose", "gestures", "body", "faces", "heat", "line",
-               "loiter", "parking", "plates")
+               "fire", "parking", "plates")
 DEFAULT_LOITER_DWELL_S = 30.0
 _VEHICLE_CLASSES = ("car", "truck", "bus", "motorcycle", "bicycle")
 LAYER_TITLES = {
@@ -57,13 +64,29 @@ LAYER_TITLES = {
     "faces":    "Face detection",
     "heat":     "Heat signature",
     "line":     "Line crossing",
+    "fire":     "Fire detection",
     "plates":   "License plates (LPR)",
 }
 
-MAX_SESSIONS = 4          # one per grid tile - the fix 2 cap
+# Fire-detection layer (single-class YOLO on the current frame). The
+# operator drops any compatible fire/smoke YOLO weights at FIRE_MODEL_PATH
+# and the layer picks them up on the next start; if the file is missing
+# the layer publishes a friendly "model not loaded" caption instead of
+# crashing the session. Two consecutive positive ticks are required to
+# raise the "FIRE DETECTED" banner (single-tick hits often flicker on
+# bright headlights or window reflections).
+FIRE_MODEL_PATH = _SRC_ROOT / "yolo_fire.pt"
+FIRE_CONF = 0.35
+FIRE_CONFIRM_TICKS = 2
+FIRE_IMGSZ = 512
+_FIRE_MODEL_CACHE: dict = {"loaded": False, "model": None, "err": None}
+_FIRE_MODEL_LOCK = threading.Lock()
+
+MAX_SESSIONS = 1          # single-camera design: only one analysis at a time
 IDLE_STOP_S = 60.0        # no client poll this long -> session shuts down
 TICK_TARGET_S = 0.8       # pacing floor between inference ticks
-LIVE_IMGSZ = 640
+LIVE_IMGSZ = 512          # was 640; smaller shortens tick ~30-40% on CPU
+                          # so box extrapolation stays within EXTRAP window
 
 # ---- overlay display filters (2026-08 accuracy pass) ----------------------
 # Raw single-frame detections flicker: one-tick ghosts, low-conf floaters,
@@ -161,7 +184,21 @@ INFER_LOCK = threading.Lock()
 # Body-anomaly layer: which behavior labels count as an anomaly worth
 # drawing (everything else - walking/standing/dwelling/driving/parked -
 # is normal street life).
-BODY_ANOMALY_LABELS = frozenset({"fall_suspect", "erratic", "running"})
+BODY_ANOMALY_LABELS = frozenset({"fall_suspect", "erratic", "running",
+                                 "sudden_motion"})
+# Body layer 2026-08-16: sudden-motion gate on wrist/ankle keypoint
+# velocity. The pose model returns COCO-17 kps; wrists (9,10) and ankles
+# (15,16) are the limbs a theft/escape/punch swings hard. Per-track ring
+# of the last N tick displacements, and flag when the newest hop exceeds
+# BODY_SUDDEN_RATIO x the median of that ring. Ratio 2.0, minimum ring 5,
+# and a hop floor in normalized (box-diagonal) units so a tiny hand jitter
+# on a small crop can't fire.
+BODY_SUDDEN_KP_IDX = (9, 10, 15, 16)
+BODY_SUDDEN_RATIO = 2.0
+BODY_SUDDEN_RING = 10
+BODY_SUDDEN_FLOOR = 0.30          # hop >= 30% of box diagonal
+BODY_SUDDEN_MIN_CONF = 0.35       # ignore low-conf kps entirely
+BODY_SUDDEN_COOLDOWN_S = 3.0      # do not re-flag the same tid for N s
 
 
 class BusyError(RuntimeError):
@@ -175,10 +212,12 @@ class BusyError(RuntimeError):
 def resolve_cam(cam_id: str, grid_path: Path | None = None) -> dict:
     """Return an analyzable camera dict for `cam_id`.
 
-    Registry cameras (app/cameras.py) win; otherwise the local picker's
+    Registry cameras (app/cameras.py) win; then the local picker's
     web/local_grid.json is searched by slot_id and a stream-resolvable
-    dict is synthesized from the slot's embed/HLS/page fields. Raises
-    ValueError when the id is unknown or the slot has no usable stream.
+    dict is synthesized from the slot's embed/HLS/page fields; finally
+    the uploaded-file store (`upload_*` ids from `/api/upload-video`)
+    is searched under `src/data/uploads/`. Raises ValueError when the
+    id is unknown or the slot has no usable stream.
     """
     from app.cameras import CAMERAS
     cam = CAMERAS.get(cam_id)
@@ -193,6 +232,17 @@ def resolve_cam(cam_id: str, grid_path: Path | None = None) -> dict:
         for slot in slots:
             if slot.get("slot_id") == cam_id:
                 return _cam_from_slot(slot)
+    # Uploaded local files: /api/upload-video saves upload_<hex>.<ext>
+    # under src/data/uploads/ and the picker offers the stem as cam_id.
+    # Match any allowed extension so MKV/MP4/MOV/etc. all resolve.
+    if cam_id.startswith("upload_"):
+        upload_dir = _SRC_ROOT / "data" / "uploads"
+        for ext in (".mp4", ".mkv", ".mov", ".avi", ".webm"):
+            candidate = upload_dir / f"{cam_id}{ext}"
+            if candidate.is_file():
+                return {"id": cam_id, "name": candidate.name,
+                        "kind": "local_file", "path": str(candidate),
+                        "country": "local"}
     raise ValueError(f"unknown camera {cam_id!r}")
 
 
@@ -242,10 +292,18 @@ def _cam_from_slot(slot: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def bump_heat(grid: list, boxes: list[dict], frame_shape, weight: float) -> None:
-    """Bank each box's foot point into the session dwell grid."""
+    """Bank each box's foot point into the session dwell grid.
+
+    Set env HEAT_DEBUG=1 to log per-tick totals (2026-08-16) - operator
+    reported the frontend peak stayed ~0 after 30s+ of dwell; the log
+    tells us whether the backend accumulator is firing at all vs a
+    JSON-transport gap on the way to the canvas.
+    """
+    import os as _os
     H, W = frame_shape[:2]
     if not (H and W):
         return
+    banked = 0
     for b in boxes:
         fx = (b["x1"] + b["x2"]) / 2.0
         fy = b["y2"]
@@ -254,6 +312,12 @@ def bump_heat(grid: list, boxes: list[dict], frame_shape, weight: float) -> None
         gx = min(GRID_W - 1, int(fx / W * GRID_W))
         gy = min(GRID_H - 1, int(fy / H * GRID_H))
         grid[gy][gx] += weight
+        banked += 1
+    if _os.environ.get("HEAT_DEBUG"):
+        total_weight = sum(v for row in grid for v in row)
+        peak = max((max(row) for row in grid), default=0.0)
+        print(f"bump_heat: banked {banked}/{len(boxes)} boxes weight={weight:.2f} "
+              f"grid_total={total_weight:.2f} peak={peak:.2f}")
 
 
 def grid_from_tracks(tracks, frame_shape) -> list:
@@ -461,6 +525,86 @@ def read_crossing_events(cam_id: str, limit: int = 20) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Fire detection: lightweight lazy loader for a dedicated fire/smoke YOLO
+# checkpoint. The layer is optional: if the weights file is missing at
+# FIRE_MODEL_PATH the loader records a friendly error and every subsequent
+# call short-circuits (no repeated file/network lookups per tick). The
+# session's fire pass reads the "err" field and shows an honest caption
+# instead of degrading silently.
+# ---------------------------------------------------------------------------
+
+def load_fire_model():
+    """Return the cached fire-detection YOLO model, or None on failure.
+
+    The loader is idempotent and thread-safe. First call attempts to
+    instantiate `ultralytics.YOLO(str(FIRE_MODEL_PATH))`; failures are
+    recorded in _FIRE_MODEL_CACHE['err'] and surfaced by the caller in
+    the layer caption. The layer's tick never blocks on loader retries.
+    """
+    if _FIRE_MODEL_CACHE.get("loaded"):
+        return _FIRE_MODEL_CACHE.get("model")
+    with _FIRE_MODEL_LOCK:
+        if _FIRE_MODEL_CACHE.get("loaded"):
+            return _FIRE_MODEL_CACHE.get("model")
+        try:
+            if not FIRE_MODEL_PATH.exists():
+                _FIRE_MODEL_CACHE.update(
+                    loaded=True, model=None,
+                    err=(f"fire model missing - place a fire/smoke YOLO at "
+                         f"{FIRE_MODEL_PATH.name} (any ultralytics-compatible "
+                         f".pt with a 'fire' class)"))
+                return None
+            from ultralytics import YOLO
+            model = YOLO(str(FIRE_MODEL_PATH))
+            _FIRE_MODEL_CACHE.update(loaded=True, model=model, err=None)
+            return model
+        except Exception as e:  # noqa: BLE001
+            _FIRE_MODEL_CACHE.update(
+                loaded=True, model=None,
+                err=f"fire model load failed: {type(e).__name__}: {e}")
+            return None
+
+
+def run_fire_inference(frame, conf: float = FIRE_CONF) -> list[dict]:
+    """Return a list of fire/smoke detection dicts for the given frame.
+
+    Each detection dict:  {"x1","y1","x2","y2","cls","conf"}.
+    Empty list when the model is unavailable or nothing was detected;
+    the caller consults load_fire_model()'s cached err for UX.
+    """
+    model = load_fire_model()
+    if model is None:
+        return []
+    try:
+        with INFER_LOCK:
+            res = model.predict(frame, imgsz=FIRE_IMGSZ, conf=conf,
+                                verbose=False)[0]
+    except Exception as e:  # noqa: BLE001
+        # A transient predict failure must not crash the session; note
+        # it once and return an empty result. The cached err surfaces
+        # in the caption.
+        prev = _FIRE_MODEL_CACHE.get("err")
+        note = f"fire predict failed: {type(e).__name__}: {e}"
+        if prev != note:
+            _FIRE_MODEL_CACHE["err"] = note
+        return []
+    if res is None or res.boxes is None:
+        return []
+    hits: list[dict] = []
+    names = getattr(model, "names", {}) or {}
+    for bb, ci, cf in zip(res.boxes.xyxy.tolist(),
+                          res.boxes.cls.tolist(),
+                          res.boxes.conf.tolist()):
+        hits.append({
+            "x1": int(bb[0]), "y1": int(bb[1]),
+            "x2": int(bb[2]), "y2": int(bb[3]),
+            "cls": str(names.get(int(ci), "fire")),
+            "conf": float(cf),
+        })
+    return hits
+
+
+# ---------------------------------------------------------------------------
 # Layer renderers - each draws ONLY its layer's semantics + an honest
 # caption. All mutate/return the given BGR frame.
 # ---------------------------------------------------------------------------
@@ -564,9 +708,66 @@ def draw_paths_layer(img, tracks, last_boxes: list[dict],
     return _caption(img, [note])
 
 
+def draw_fire_layer(img, hits: list[dict], confirmed: bool,
+                    model_err: str | None = None):
+    """Bright-orange boxes on any fire/smoke detection + a top banner
+    when the detection has been present for FIRE_CONFIRM_TICKS in a
+    row. When the dedicated fire model failed to load, `model_err`
+    surfaces in the caption instead of a silent empty frame."""
+    import cv2
+    for h in (hits or []):
+        p1 = (int(h["x1"]), int(h["y1"]))
+        p2 = (int(h["x2"]), int(h["y2"]))
+        # Bright saturated orange (BGR 20,140,255) - stands out against
+        # both night and day scenes without collinding with the tracker's
+        # cyan / green / red palette used by other layers.
+        cv2.rectangle(img, p1, p2, (20, 140, 255), 3, cv2.LINE_AA)
+        label = f"{h.get('cls', 'fire')} {float(h.get('conf', 0)):.2f}"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX,
+                                      0.55, 2)
+        ty = max(th + 6, p1[1] - 4)
+        cv2.rectangle(img, (p1[0], ty - th - 6),
+                      (p1[0] + tw + 8, ty + 2), (30, 30, 30), -1)
+        cv2.putText(img, label, (p1[0] + 4, ty - 3),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (60, 200, 255), 2,
+                    cv2.LINE_AA)
+    if confirmed:
+        _alert_banner(img, "FIRE DETECTED")
+    if model_err:
+        note = f"Fire detection - {model_err}"
+    elif not hits:
+        note = "Fire detection - no fire/smoke in view"
+    elif not confirmed:
+        note = (f"Fire detection - {len(hits)} candidate(s), "
+                f"awaiting {FIRE_CONFIRM_TICKS}-tick confirmation")
+    else:
+        note = (f"Fire detection - {len(hits)} confirmed hit(s) "
+                f"(alert active)")
+    return _caption(img, [note])
+
+
 def draw_zones_layer(img, entries: list[dict], kind: str):
     """Polygons + occupancy caption for the loiter / parking layers - the
-    JPEG-fallback rendering; the canvas overlay is the primary view."""
+    JPEG-fallback rendering; the canvas overlay is the primary view.
+
+    Semantics that distinguish "zones & loitering" from "line crossing":
+
+    * geometry - loiter is POLYGONAL (any convex/concave shape drawn on
+      the frame), line crossing is a single ORIENTED SEGMENT. A closed
+      polygon can gate an alcove or shopfront a straight line cannot;
+    * signal - loiter fires on DWELL (the person has been inside for
+      >= dwell_s seconds), line crossing fires on TRAJECTORY (a track
+      that transitioned from one side of the line to the other, once
+      per direction);
+    * alert cardinality - loiter alerts ONCE per (track, zone) while the
+      dwell exceeds threshold, and clears when the person leaves; line
+      crossings increment per crossing (a single track can cross N times
+      and be counted N times).
+
+    If a customer only cares about counting foot traffic past a threshold,
+    line crossing is the right layer. Zones + loitering is the right
+    layer when the question is "who lingered where, for how long".
+    """
     import cv2
     import numpy as np
     H, W = img.shape[:2]
@@ -594,11 +795,15 @@ def draw_zones_layer(img, entries: list[dict], kind: str):
                 " - nothing drawn yet (use the Draw zones button)")
     elif kind == "parking":
         occ = sum(1 for e in entries if e.get("occupied"))
-        note = f"Parking - {occ}/{len(entries)} occupied"
+        note = (f"Parking - {occ}/{len(entries)} occupied "
+                "(vehicle stationary in operator-drawn spot; state flips "
+                "emit occupied / vacated events)")
     else:
         note = (f"Zone & loitering - "
                 f"{sum(e.get('count', 0) for e in entries)} inside, "
-                f"{sum(1 for e in entries if e.get('alert'))} alert(s)")
+                f"{sum(1 for e in entries if e.get('alert'))} alert(s) "
+                "(sustained presence in polygon; body-anomalies is the "
+                "kinematic-per-person layer, this one is region-based)")
     return _caption(img, [note])
 
 
@@ -683,44 +888,77 @@ def draw_gestures_layer(img, boxes: list[dict], stats_by_id: dict,
     return _caption(img, lines)
 
 
-def draw_body_layer(img, boxes: list[dict], stats_by_id: dict):
-    """Fall-detection-style live view (the operator's reference clip):
-    a status HUD tallies everyone, flagged people get a red box +
-    skeleton + verdict chip, and an ALERT banner burns while a
-    fall/erratic flag is live. Normal street life stays unmarked."""
+def draw_body_layer(img, boxes: list[dict], stats_by_id: dict,
+                    sudden_tids: set | None = None):
+    """Body-anomaly view (2026-08-16):
+    * every person still gets their detection box drawn so operators can
+      see the scene, but the box color STANDS OUT only when flagged;
+    * FAST/SUDDEN motion (wrist/ankle burst - theft, escape, punch)
+      draws a red HALO circle around the person and a "SUDDEN MOTION"
+      tag - a persistent verdict caption, not just a count in the HUD;
+    * behavior-label flags (fall_suspect / erratic / running / etc)
+      keep their box + skeleton + chip;
+    * an ALERT banner burns while any alert-grade flag is live.
+    Normal street life stays unmarked (grey box, no tag)."""
     import cv2
+    sudden = set(sudden_tids or ())
     persons = [b for b in boxes if b.get("cls") == "person"]
     flagged = []
     for b in persons:
         s = stats_by_id.get(b.get("track_id"))
-        if not s:
-            continue
-        if s.get("label") in BODY_ANOMALY_LABELS or s.get("pose_flags"):
-            flagged.append((b, s))
-    for b, s in flagged:
-        color = (0, 0, 220) if s.get("alert") else (0, 150, 230)
+        is_sudden = b.get("track_id") in sudden
+        if s and (s.get("label") in BODY_ANOMALY_LABELS
+                  or s.get("pose_flags")):
+            flagged.append((b, s, is_sudden))
+        elif is_sudden:
+            flagged.append((b, {}, True))
+    for b in persons:
+        # Neutral box so the operator still sees where people are, but
+        # flagged persons get a red overlay on top.
         cv2.rectangle(img, (int(b["x1"]), int(b["y1"])),
-                      (int(b["x2"]), int(b["y2"])), color, 2)
+                      (int(b["x2"]), int(b["y2"])), (140, 140, 140), 1)
+    for b, s, is_sudden in flagged:
+        color = (0, 0, 220) if (s.get("alert") or is_sudden) else (0, 150, 230)
+        cv2.rectangle(img, (int(b["x1"]), int(b["y1"])),
+                      (int(b["x2"]), int(b["y2"])), color, 3)
+        if is_sudden:
+            # Red halo (wide anti-aliased circle around the person) so a
+            # sudden-motion flag is unmistakable at a glance.
+            cx = int((b["x1"] + b["x2"]) / 2)
+            cy = int((b["y1"] + b["y2"]) / 2)
+            r_halo = int(max(b["x2"] - b["x1"], b["y2"] - b["y1"]) * 0.75)
+            cv2.circle(img, (cx, cy), r_halo, (0, 0, 220), 4,
+                       cv2.LINE_AA)
+            cv2.circle(img, (cx, cy), r_halo + 4, (0, 0, 120), 1,
+                       cv2.LINE_AA)
         if b.get("kps"):
             from app.pose import draw_skeleton
             draw_skeleton(img, [b])
-        txt = f"#{s.get('id', '?')} {(s.get('label') or '').upper()}"
+        parts = [f"#{s.get('id', b.get('track_id', '?'))}"]
+        if is_sudden:
+            parts.append("SUDDEN MOTION")
+        if s.get("label"):
+            parts.append(str(s["label"]).upper())
         extra = [f for f in (s.get("pose_flags") or [])
                  if f and f != s.get("label")]
         if extra:
-            txt += " " + "+".join(extra)
-        _chip(img, b, txt, color)
-    alerts = [s for _, s in flagged if s.get("alert")]
+            parts.append("+".join(extra))
+        _chip(img, b, " ".join(parts), color)
+    alerts = [s for _, s, _ in flagged if s.get("alert")]
+    sudden_count = sum(1 for _, _, sud in flagged if sud)
     _hud_panel(img, ["BODY ANOMALIES",
                      f"persons in view: {len(persons)}",
                      f"flagged: {len(flagged)}"
-                     + ("" if flagged else " (none right now)")],
-               alert=bool(alerts))
-    if alerts:
+                     + (f" ({sudden_count} sudden)" if sudden_count
+                        else "" if flagged else " (none right now)")],
+               alert=bool(alerts or sudden_count))
+    if alerts or sudden_count:
         kinds: dict[str, int] = {}
         for s in alerts:
             k = (s.get("label") or "?").upper().replace("_", " ")
             kinds[k] = kinds.get(k, 0) + 1
+        if sudden_count:
+            kinds["SUDDEN MOTION"] = sudden_count
         _alert_banner(img, "ALERT! " + ", ".join(
             f"{n} {k}" for k, n in sorted(kinds.items())))
     return img
@@ -739,46 +977,38 @@ def draw_faces_layer_img(img, faces_list: list[dict], available: bool = True):
 
 
 def draw_heat_layer(img, grid: list, since: float | None = None):
-    """Full heat-vision view (fix 3, per the operator's requirement that
-    picking heat CHANGES THE WHOLE PICTURE): the frame is re-rendered as
-    a thermal-style colormap driven by its own brightness, and the
-    session's dwell accumulation on THIS camera burns its zones toward
-    the hot end. Not a thermal sensor - the caption says exactly what
-    drives the colors. The accumulation itself never belongs to another
-    camera (the fix 2 rule)."""
-    import cv2
-    import numpy as np
-    H, W = img.shape[:2]
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
-    signal = gray * 0.72
-    g = np.asarray(grid, dtype=np.float32)
-    peak = float(g.max())
-    if peak > 0:
-        dwell = np.sqrt(g / peak)
-        dwell = cv2.resize(dwell, (W, H), interpolation=cv2.INTER_LINEAR)
-        dwell = cv2.GaussianBlur(dwell, (0, 0), sigmaX=max(2.0, W / 96.0))
-        m = float(dwell.max())
-        if m > 0:
-            dwell /= m
-        signal = np.clip(signal + dwell * 0.55, 0.0, 1.0)
-    out = cv2.applyColorMap((signal * 255).astype(np.uint8),
-                            cv2.COLORMAP_INFERNO)
+    """Dwell overlay of the SESSION'S OWN accumulation on this camera -
+    the original (pre-"fix 3") style the operator asked to be restored:
+    TURBO colormap + Gaussian blur + signal-modulated alpha blend on top
+    of the live frame (`heatmap.overlay`), not a full-frame thermal
+    recolor. Empty street stays a photo; only where activity accumulated
+    does color bloom in."""
+    from app.heatmap import overlay
+    out = overlay(grid, base_frame=img)
     if since:
         el = int(time.time() - since)
         mm, ss = divmod(el, 60)
-        note = (f"Heat vision - dwell accumulating since "
+        note = (f"Heat signature - dwell accumulating since "
                 f"{time.strftime('%H:%M:%S', time.localtime(since))} "
                 f"({mm}m{ss:02d}s)")
     else:
-        note = "Heat vision - dwell over this window"
+        note = "Heat signature - dwell over this window"
+    peak = max((max(row) for row in grid), default=0.0)
     if peak <= 0:
-        note += " - no dwell banked yet (brightness only)"
-    return _caption(out, [note,
-                          "stylized: brightness + dwell, not a thermal "
-                          "sensor"])
+        note += " - no activity banked yet"
+    return _caption(out, [note])
 
 
 def draw_line_layer(img, line: list, cross: dict):
+    """Counting line + BIG top-center IN/OUT counter (2026-08-16).
+
+    Old placement painted small yellow "IN N OUT N" text next to the
+    line's midpoint, which for a mid-height line sat squarely under
+    YouTube's own hover controls and was invisible during playback. The
+    counter now anchors top-center with 48pt glowing text - green for IN,
+    red for OUT - so the operator reads it at a glance regardless of
+    where the operator drew the line.
+    """
     import cv2
     H, W = img.shape[:2]
     (ax, ay), (bx, by) = line
@@ -787,13 +1017,42 @@ def draw_line_layer(img, line: list, cross: dict):
     cv2.line(img, p0, p1, (0, 215, 255), 3, cv2.LINE_AA)
     for p in (p0, p1):
         cv2.circle(img, p, 6, (0, 215, 255), -1, cv2.LINE_AA)
-    mid = ((p0[0] + p1[0]) // 2, (p0[1] + p1[1]) // 2)
-    txt = f"IN {cross.get('in', 0)}  OUT {cross.get('out', 0)}"
-    cv2.putText(img, txt, (max(8, mid[0] - 70), max(24, mid[1] - 12)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 215, 255), 2,
-                cv2.LINE_AA)
-    return _caption(img, [f"Line crossing - IN {cross.get('in', 0)} / "
-                          f"OUT {cross.get('out', 0)} (session total)"])
+    n_in = int(cross.get("in", 0))
+    n_out = int(cross.get("out", 0))
+    # Big top-center readout: font size scales with frame width (48pt at
+    # 960px, floors at 24pt for tiny embeds). One draw for green IN + gap
+    # + red OUT so operators see both channels side-by-side.
+    fs = max(0.9, min(1.8, W / 960.0 * 1.4))
+    thick = 3 if fs >= 1.0 else 2
+    txt_in = f"IN {n_in}"
+    txt_sep = "   "
+    txt_out = f"OUT {n_out}"
+    (tw_i, th_i), _ = cv2.getTextSize(txt_in, cv2.FONT_HERSHEY_SIMPLEX,
+                                       fs, thick)
+    (tw_o, th_o), _ = cv2.getTextSize(txt_out, cv2.FONT_HERSHEY_SIMPLEX,
+                                       fs, thick)
+    (tw_s, _), _ = cv2.getTextSize(txt_sep, cv2.FONT_HERSHEY_SIMPLEX,
+                                    fs, thick)
+    total_w = tw_i + tw_s + tw_o
+    text_h = max(th_i, th_o)
+    x0 = max(8, (W - total_w) // 2)
+    y0 = max(8, int(text_h * 0.55))
+    # Dark backdrop so the glow reads on bright frames too.
+    cv2.rectangle(img, (x0 - 14, 4),
+                  (min(W - 4, x0 + total_w + 14), y0 + int(text_h * 0.7)),
+                  (18, 18, 18), -1)
+    # Glow pass (semi-transparent thick stroke) + solid text on top.
+    for extra in (thick + 4, thick):
+        col_in = (0, 200, 60) if extra == thick else (0, 90, 30)
+        col_out = (60, 60, 220) if extra == thick else (30, 30, 90)
+        cv2.putText(img, txt_in, (x0, y0 + text_h),
+                    cv2.FONT_HERSHEY_SIMPLEX, fs, col_in, extra,
+                    cv2.LINE_AA)
+        cv2.putText(img, txt_out, (x0 + tw_i + tw_s, y0 + text_h),
+                    cv2.FONT_HERSHEY_SIMPLEX, fs, col_out, extra,
+                    cv2.LINE_AA)
+    # No top strip caption on this layer - the big readout replaces it.
+    return img
 
 
 # ---------------------------------------------------------------------------
@@ -887,6 +1146,60 @@ def _static_postures(kps: list) -> list:
             out.append("hand_raised")
             break
     return out
+
+
+def _face_from_head_kps(kps: list) -> dict | None:
+    """Rough face rectangle from COCO head keypoints (nose, eyes, ears).
+    Fallback for the faces layer when the dedicated face detector returns
+    nothing (2026-08-16): a pose-model that anchors a nose+one eye can
+    approximate a face bbox where YuNet gives up. Width comes from the
+    widest confident pair among the head kps (ideally ear-to-ear, else
+    eye-to-eye, else a padded nose point); height is width * 1.3. Returns
+    None when there aren't enough confident head kps to draw anything
+    honest (single low-conf nose alone doesn't cut it)."""
+    CONF_MIN = 0.35
+    NOSE_I, LE, RE, LEA, REA = 0, 1, 2, 3, 4
+    def get(i):
+        if i < len(kps) and kps[i] and len(kps[i]) >= 3 and kps[i][2] >= CONF_MIN:
+            return (float(kps[i][0]), float(kps[i][1]), float(kps[i][2]))
+        return None
+    nose = get(NOSE_I)
+    le, re = get(LE), get(RE)
+    lear, rear = get(LEA), get(REA)
+    # Priority: ear-to-ear > eye-to-eye > single eye + nose > nose only
+    width = None
+    cx = cy = None
+    confs = []
+    if lear and rear:
+        width = abs(lear[0] - rear[0])
+        cx = (lear[0] + rear[0]) / 2
+        cy = (lear[1] + rear[1]) / 2
+        confs = [lear[2], rear[2]]
+    elif le and re:
+        # eye-to-eye is ~0.4 of ear-to-ear; scale up for face box.
+        width = abs(le[0] - re[0]) * 2.5
+        cx = (le[0] + re[0]) / 2
+        cy = (le[1] + re[1]) / 2 + width * 0.15
+        confs = [le[2], re[2]]
+    elif nose and (le or re or lear or rear):
+        anchor = le or re or lear or rear
+        width = abs(nose[0] - anchor[0]) * 3.0
+        cx = nose[0]
+        cy = nose[1]
+        confs = [nose[2], anchor[2]]
+    else:
+        return None
+    if not width or width < 8:
+        return None
+    height = width * 1.3
+    x1 = cx - width / 2
+    y1 = cy - height * 0.45
+    x2 = cx + width / 2
+    y2 = cy + height * 0.55
+    return {"x1": round(x1, 1), "y1": round(y1, 1),
+            "x2": round(x2, 1), "y2": round(y2, 1),
+            "conf": round(sum(confs) / len(confs), 3),
+            "source": "pose_kps"}
 
 
 def _pt_in_poly(x: float, y: float, pts: list) -> bool:
@@ -1206,6 +1519,14 @@ class LiveSession(threading.Thread):
         self._faces_ok: bool | None = None
         self._fail = 0
         self._last_tick: float | None = None
+        # Fire layer per-session state: last tick's detections + a
+        # consecutive-positive-tick streak. Confirmation only fires when
+        # streak reaches FIRE_CONFIRM_TICKS (matches the operator's spec
+        # of "any hit confirmed for >2 consecutive ticks" - two ticks in
+        # a row means the alert appears on the second tick).
+        self._fire_hits: list[dict] = []
+        self._fire_streak = 0
+        self._fire_confirmed = False
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -1231,13 +1552,21 @@ class LiveSession(threading.Thread):
                 layer = self.layer
                 if layer in ("pose", "gestures", "body"):
                     self._pose_pass(frame, boxes)
-                if layer == "plates":
+                if layer == "plates" and self.cam.get("kind") != "youtube":
+                    # YouTube embeds are decoded on the client (iframe)
+                    # and the backend either grabs a screen-capture crop
+                    # (poor for LPR) or a compressed proxy JPEG - neither
+                    # gives plate pixels sharp enough for OCR. Skip the
+                    # OCR pass entirely so we don't waste inference; the
+                    # frontend envelope explains why (see below).
                     self._plates_pass(frame)
                 if layer == "parking":
                     self._parking_probe(frame)
+                if layer == "fire":
+                    self._fire_pass(frame)
                 faces_list: list[dict] = []
                 if layer == "faces":
-                    faces_list = self._faces_pass(frame)
+                    faces_list = self._faces_pass(frame, boxes)
                 self._accumulate(frame, boxes, now)
                 img = self._render(frame, faces_list, layer)
                 self._publish(img)
@@ -1263,6 +1592,17 @@ class LiveSession(threading.Thread):
         except Exception:
             self._fail += 1
             return None
+        # Screen-capture fallback (yt-dlp blocked, SCREEN_CAPTURE_FALLBACK=1
+        # in env). The sentinel URL has no host, no manifest, no shared
+        # decoder; grab_frame(sentinel) short-circuits to PIL ImageGrab.
+        if url and url.startswith("screen://"):
+            frame = grab_frame(url)
+            if frame is None:
+                self._fail += 1
+            else:
+                self._fail = 0
+                self._last_frame_ts = time.time()
+            return frame
         # Header-required hosts (tvkur, ibb, skyline) can't ride a plain
         # persistent VideoCapture - every segment request needs Referer/
         # Origin headers - so they keep the old per-tick segment path.
@@ -1372,24 +1712,58 @@ class LiveSession(threading.Thread):
                 print(f"live-analysis {self.cam_id}: plates pass disabled "
                       f"({type(e).__name__}: {e})")
 
-    def _faces_pass(self, frame) -> list[dict]:
+    def _faces_pass(self, frame, boxes: list[dict] | None = None
+                     ) -> list[dict]:
         from app import faces as _faces
         if self._faces_ok is None:
             self._faces_ok = _faces.available()
-        if not self._faces_ok:
+        faces_from_yunet: list[dict] = []
+        if self._faces_ok:
+            faces_from_yunet = _faces.detect_faces(frame)
+            # YuNet's own shipped threshold is 0.60 (see FACE_SCORE in
+            # app/faces.py). The earlier 0.9 + 24px filter was tuned for
+            # night far-field cameras and killed every face on day cameras
+            # at street-mid range - the exact distance the earlier repo's
+            # face demo used. Relaxed to YuNet's own 0.6 + a 16px floor,
+            # kept the 32-face hard cap so a busy day frame stays snappy.
+            faces_from_yunet = [
+                f for f in faces_from_yunet
+                if float(f.get("conf") or 0) >= 0.6
+                and (f["x2"] - f["x1"]) >= 16
+                and (f["y2"] - f["y1"]) >= 16]
+            faces_from_yunet.sort(key=lambda f: -float(f.get("conf") or 0))
+        if faces_from_yunet:
+            return faces_from_yunet[:32]
+        # Pose-keypoint fallback (2026-08-16, operator: "old version
+        # detected faces here"). YuNet often returns zero on far-field or
+        # partly-turned faces the pose model can still anchor on. We run
+        # the crop-based pose pass on person boxes and derive a rough
+        # face box from the head-cluster keypoints (nose, eyes, ears).
+        # Better a rough rectangle than a hard zero - the caption clearly
+        # tags these as pose-derived so no one confuses them for YuNet
+        # detections.
+        if not boxes:
             return []
-        out = _faces.detect_faces(frame)
-        # Industry envelope (AWS floor 40px, Azure 36px, YuNet's own
-        # shipped threshold 0.9): conf >= 0.9 and face >= 24px, hard cap
-        # 32. Night frames once sprayed 440 sub-threshold noise rects;
-        # under this gate the honest common case on far-field night
-        # street cams is ZERO faces - which the overlay states instead
-        # of drawing speculation.
-        out = [f for f in out
-               if float(f.get("conf") or 0) >= 0.9
-               and (f["x2"] - f["x1"]) >= 24 and (f["y2"] - f["y1"]) >= 24]
-        out.sort(key=lambda f: -float(f.get("conf") or 0))
-        return out[:32]
+        try:
+            from app.pose import attach_keypoints_crops, load_pose_model
+            attach_keypoints_crops(load_pose_model(), frame, boxes,
+                                   min_box_h=KPS_MIN_BOX_H,
+                                   max_crops=POSE_MAX_CROPS)
+        except Exception as e:
+            if not getattr(self, "_faces_pose_err_once", False):
+                self._faces_pose_err_once = True
+                print(f"live-analysis {self.cam_id}: face pose fallback "
+                      f"disabled ({type(e).__name__}: {e})")
+            return []
+        derived: list[dict] = []
+        for b in boxes:
+            if b.get("cls") != "person" or not b.get("kps"):
+                continue
+            face = _face_from_head_kps(b["kps"])
+            if face is not None:
+                derived.append(face)
+        derived.sort(key=lambda f: -float(f.get("conf") or 0))
+        return derived[:32]
 
     def _zones_json_mtime(self) -> float | None:
         from app.cameras import _zones_dir
@@ -1532,12 +1906,11 @@ class LiveSession(threading.Thread):
                 row["id"] = tr.tid
                 if (layer in ("gestures", "body")
                         and not (tr.cls == "person" and tr.tid in riders)):
-                    from app.behavior_labels import label_track
+                    # behavior_labels removed with Category C; keep gestures
+                    # + kinematic stats without the running/erratic labels.
                     from app.gestures import detect_gestures
                     kseq = [b.get("kps") for b in tr.boxes[-16:]]
                     has_kps = any(kseq)
-                    row.update(label_track(row, frame.shape,
-                                           kseq if has_kps else None))
                     row["gestures"] = detect_gestures(kseq) if has_kps else []
                     for g in row["gestures"]:
                         seen = self._track_gestures.setdefault(tr.tid, set())
@@ -1554,7 +1927,13 @@ class LiveSession(threading.Thread):
             return draw_gestures_layer(img, visible, stats_by_id,
                                        self.gesture_counts)
         if layer == "body":
-            return draw_body_layer(img, visible, stats_by_id)
+            # Reuse whichever tids already tripped the sudden-motion gate
+            # during this session (populated by _sudden_motion_check inside
+            # the JSON publish for the same tick).
+            sudden_tids = {tid for tid, ts in
+                           getattr(self, "_body_kp_flag_ts", {}).items()
+                           if time.time() - ts < BODY_SUDDEN_COOLDOWN_S}
+            return draw_body_layer(img, visible, stats_by_id, sudden_tids)
         if layer == "faces":
             return draw_faces_layer_img(img, faces_list,
                                         available=bool(self._faces_ok))
@@ -1562,11 +1941,46 @@ class LiveSession(threading.Thread):
             return draw_heat_layer(img, self.heat, since=self.heat_since)
         if layer == "line":
             return draw_line_layer(img, self.line, self.cross)
-        if layer in ("loiter", "parking"):
-            lo, pk, _dwell = self._zone_stats(frame.shape)
-            return draw_zones_layer(img, lo if layer == "loiter" else pk,
-                                    layer)
+        if layer == "fire":
+            hits = getattr(self, "_fire_hits", []) or []
+            confirmed = bool(getattr(self, "_fire_confirmed", False))
+            model_err = _FIRE_MODEL_CACHE.get("err") if not \
+                _FIRE_MODEL_CACHE.get("model") else None
+            return draw_fire_layer(img, hits, confirmed, model_err)
+        if layer == "parking":
+            _lo, pk, _dwell = self._zone_stats(frame.shape)
+            return draw_zones_layer(img, pk, "parking")
+        if layer == "plates":
+            # YouTube-guarded caption (2026-08-16): running the OCR pass
+            # on YouTube stream pixels wastes inference for a physically
+            # unreliable read; tell the operator instead of showing a
+            # bare unchanged frame.
+            if self.cam.get("kind") == "youtube":
+                return _caption(img, [
+                    "License plates - disabled for YouTube streams",
+                    "Upload an MP4/MKV video to test LPR (Analyze -> plates)"])
+            return draw_plates_layer(img, visible)
         return img
+
+    def _fire_pass(self, frame) -> None:
+        """Run the dedicated fire/smoke detector on the current frame and
+        update this session's confirmation streak. Keeps zero state when
+        the fire model is unavailable so the layer degrades to an honest
+        "model not loaded" caption without crashing the session."""
+        try:
+            hits = run_fire_inference(frame, conf=FIRE_CONF)
+        except Exception as e:  # noqa: BLE001 - keep the tick alive
+            if not getattr(self, "_fire_err_once", False):
+                self._fire_err_once = True
+                print(f"live-analysis {self.cam_id}: fire pass disabled "
+                      f"({type(e).__name__}: {e})")
+            hits = []
+        self._fire_hits = hits
+        if hits:
+            self._fire_streak = int(getattr(self, "_fire_streak", 0)) + 1
+        else:
+            self._fire_streak = 0
+        self._fire_confirmed = self._fire_streak >= FIRE_CONFIRM_TICKS
 
     def _parking_probe(self, frame) -> None:
         """Trackerless occupancy assist (parking layer only): re-detect
@@ -1760,6 +2174,63 @@ class LiveSession(threading.Thread):
         self._zone_cache = result
         return result
 
+    def _sudden_motion_check(self, tid: int, kps: list,
+                              box: tuple, now: float) -> bool:
+        """True on the tick a track's wrist/ankle keypoint velocity spikes
+        far above its own recent baseline (theft snatch, punch, kick, run
+        burst). Per-tid ring of the last BODY_SUDDEN_RING mean-hop
+        displacements between the previous kp position and the newest one,
+        measured across the four fast-limb keypoints (wrists, ankles) in
+        normalized (box-diagonal) units so a person 30 px tall in the
+        distance and one 400 px tall up close are comparable. Fires only
+        when both the ratio AND the absolute floor gates trip, plus a
+        per-tid cooldown so one anomaly doesn't paint every following
+        tick red until the streak decays."""
+        if not hasattr(self, "_body_kp_hist"):
+            self._body_kp_hist: dict[int, list[float]] = {}
+            self._body_kp_prev: dict[int, list] = {}
+            self._body_kp_flag_ts: dict[int, float] = {}
+        prev = self._body_kp_prev.get(tid)
+        self._body_kp_prev[tid] = kps
+        if not prev or len(prev) != len(kps):
+            return False
+        x1, y1, x2, y2 = box
+        diag = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+        if diag < 8:
+            return False
+        hops = []
+        for idx in BODY_SUDDEN_KP_IDX:
+            if idx >= len(kps) or idx >= len(prev):
+                continue
+            p, q = prev[idx], kps[idx]
+            if (not p or not q or len(p) < 3 or len(q) < 3
+                    or p[2] < BODY_SUDDEN_MIN_CONF
+                    or q[2] < BODY_SUDDEN_MIN_CONF):
+                continue
+            dx = q[0] - p[0]
+            dy = q[1] - p[1]
+            hops.append(((dx * dx + dy * dy) ** 0.5) / diag)
+        if not hops:
+            return False
+        mean_hop = sum(hops) / len(hops)
+        ring = self._body_kp_hist.setdefault(tid, [])
+        ring.append(mean_hop)
+        if len(ring) > BODY_SUDDEN_RING:
+            del ring[:-BODY_SUDDEN_RING]
+        # Need at least a few observations for a meaningful baseline.
+        if len(ring) < 5:
+            return False
+        # Median of the ring EXCLUDING this newest hop is the baseline.
+        baseline_sorted = sorted(ring[:-1])
+        median = baseline_sorted[len(baseline_sorted) // 2] or 1e-6
+        last_flag = self._body_kp_flag_ts.get(tid, 0.0)
+        if now - last_flag < BODY_SUDDEN_COOLDOWN_S:
+            return False
+        if mean_hop >= BODY_SUDDEN_FLOOR and mean_hop >= BODY_SUDDEN_RATIO * median:
+            self._body_kp_flag_ts[tid] = now
+            return True
+        return False
+
     def _publish(self, img) -> None:
         import cv2
         H, W = img.shape[:2]
@@ -1859,6 +2330,13 @@ class LiveSession(threading.Thread):
                     jb["tier"] = "moving"
                 else:
                     jb["tier"] = "fast"
+                # Also expose a numeric speed the frontend can print
+                # next to the tier chip (2026-08-16 - operator asked for
+                # a speed number, not just a category). blps is honest
+                # even without ground-plane calibration; px/s is exposed
+                # too for those who want a raw pixel rate.
+                jb["speed_blps"] = round(float(blps), 2)
+                jb["speed_pxs"] = int(spd)
             elif layer == "plates":
                 if last.get("plate"):
                     jb["plate"] = last["plate"]
@@ -1886,45 +2364,22 @@ class LiveSession(threading.Thread):
                 if (layer == "body" and tr.cls == "person"
                         and tr.tid not in riders_pub):
                     try:
-                        from app.behavior import track_stats
-                        from app.behavior_labels import label_track
-                        row = track_stats(tr.cls, tr.boxes, tr.times,
-                                          frame_shape)
-                        kseq = [b.get("kps") for b in tr.boxes[-16:]]
-                        row.update(label_track(row, frame_shape,
-                                               kseq if any(kseq) else None))
-                        label = row.get("label") \
-                            if (row.get("label") in BODY_ANOMALY_LABELS
-                                or row.get("pose_flags")) else None
-                        # Persistence (the production false-alarm gate):
-                        # a flag must repeat on 2 consecutive ticks for
-                        # the SAME track before the operator sees it -
-                        # at ~1s ticks the actual fall transition is
-                        # unobservable anyway; the persistent lying /
-                        # erratic STATE is what we can honestly claim.
-                        if not hasattr(self, "_body_streak"):
-                            self._body_streak = {}
-                        if label:
-                            key = (tr.tid, label)
-                            n = self._body_streak.get(key, 0) + 1
-                            self._body_streak = {
-                                k: v for k, v in self._body_streak.items()
-                                if k[0] != tr.tid or k == key}
-                            self._body_streak[key] = n
-                            if n >= 2:
-                                jb["flag"] = label
-                                jb["alert"] = bool(row.get("alert"))
-                                flags = [f for f in
-                                         (row.get("pose_flags") or [])
-                                         if f and f != label]
-                                if flags:
-                                    jb["flags"] = flags
-                        else:
-                            if hasattr(self, "_body_streak"):
-                                self._body_streak = {
-                                    k: v for k, v
-                                    in self._body_streak.items()
-                                    if k[0] != tr.tid}
+                        # Sudden-motion gate (2026-08-16, replaces the
+                        # removed behavior_labels path). Per-track ring of
+                        # the last N wrist/ankle hops; if the newest hop
+                        # is >= BODY_SUDDEN_RATIO x the median AND above
+                        # BODY_SUDDEN_FLOOR in box-diagonal units, mint a
+                        # "sudden_motion" flag. Anti-spam cooldown per
+                        # tid so one punch doesn't fire on every tick.
+                        if jb.get("kps"):
+                            flagged = self._sudden_motion_check(
+                                tr.tid, jb["kps"],
+                                (jb["x1"], jb["y1"], jb["x2"], jb["y2"]),
+                                time.time())
+                            if flagged:
+                                jb["flag"] = "sudden_motion"
+                                jb["alert"] = True
+                                jb["flags"] = ["wrist/ankle burst"]
                     except Exception:
                         pass
             js_boxes.append(jb)
@@ -1965,20 +2420,25 @@ class LiveSession(threading.Thread):
             data["cross"] = dict(self.cross)
         if layer == "gestures" and self.gesture_counts:
             data["gesture_counts"] = dict(self.gesture_counts)
-        if layer in ("loiter", "parking"):
-            lo, pk, dwell_by_tid = self._zone_stats(frame_shape)
-            if layer == "loiter":
-                data["zones"] = [{**e, "max_dwell": int(e["max_dwell"])}
-                                 for e in lo]
-                for jb in js_boxes:
-                    if (jb["cls"] == "person"
-                            and jb["tid"] in dwell_by_tid):
-                        jb["dwell"] = int(dwell_by_tid[jb["tid"]])
-            else:
-                data["spots"] = pk
-                data["parking"] = {
-                    "total": len(pk),
-                    "occupied": sum(1 for e in pk if e["occupied"])}
+        if layer == "fire":
+            hits = getattr(self, "_fire_hits", []) or []
+            data["fire"] = {
+                "hits": [{"x1": h["x1"], "y1": h["y1"],
+                          "x2": h["x2"], "y2": h["y2"],
+                          "cls": h.get("cls", "fire"),
+                          "conf": round(float(h.get("conf") or 0), 3)}
+                         for h in hits],
+                "confirmed": bool(getattr(self, "_fire_confirmed", False)),
+                "streak": int(getattr(self, "_fire_streak", 0)),
+                "err": (_FIRE_MODEL_CACHE.get("err")
+                        if not _FIRE_MODEL_CACHE.get("model") else None),
+            }
+        if layer == "parking":
+            _lo, pk, _dwell = self._zone_stats(frame_shape)
+            data["spots"] = pk
+            data["parking"] = {
+                "total": len(pk),
+                "occupied": sum(1 for e in pk if e["occupied"])}
         if layer == "faces":
             data["faces"] = [
                 {"x1": int(f["x1"]), "y1": int(f["y1"]),
@@ -1987,15 +2447,26 @@ class LiveSession(threading.Thread):
                 for f in (faces_list or [])]
             data["faces_ok"] = bool(self._faces_ok)
         if layer == "plates":
-            from app.plates import MIN_VEHICLE_W, PLATE_VEHICLE_CLASSES
-            veh = [b for b in js_boxes if b["cls"] in PLATE_VEHICLE_CLASSES]
-            in_range = [b for b in veh
-                        if (b["x2"] - b["x1"]) >= MIN_VEHICLE_W]
-            read = [b for b in veh if b.get("plate")]
-            data["envelope"] = (
-                f"{len(veh)} vehicles · {len(in_range)} in plate range "
-                f"(>={MIN_VEHICLE_W}px wide) · {len(read)} read "
-                f"(digits+Latin; Thai script out of alphabet)")
+            if self.cam.get("kind") == "youtube":
+                # 2026-08-16: YouTube streams either get screen-captured
+                # (unreliable pixel quality for OCR) or run through an
+                # iframe the backend cannot inspect - either way the
+                # plate pixels are physically insufficient for a Latin
+                # OCR read. Skip the pass and say so honestly.
+                data["envelope"] = (
+                    "plates layer disabled for YouTube streams - "
+                    "use Upload video to test LPR")
+            else:
+                from app.plates import MIN_VEHICLE_W, PLATE_VEHICLE_CLASSES
+                veh = [b for b in js_boxes
+                       if b["cls"] in PLATE_VEHICLE_CLASSES]
+                in_range = [b for b in veh
+                            if (b["x2"] - b["x1"]) >= MIN_VEHICLE_W]
+                read = [b for b in veh if b.get("plate")]
+                data["envelope"] = (
+                    f"{len(veh)} vehicles · {len(in_range)} in plate range "
+                    f"(>={MIN_VEHICLE_W}px wide) · {len(read)} read "
+                    f"(digits+Latin; Thai script out of alphabet)")
         # Operating-envelope note per pose-family layer: how many people
         # were in scene vs how many passed the size gates, so an empty
         # overlay reads as an honest "out of range", not a failure.
@@ -2003,10 +2474,16 @@ class LiveSession(threading.Thread):
             persons = [b for b in js_boxes if b["cls"] == "person"]
             with_kps = [b for b in persons if b.get("kps")]
             if layer == "faces":
+                pose_derived = sum(1 for f in (faces_list or [])
+                                   if f.get("source") == "pose_kps")
+                yunet_n = len(faces_list or []) - pose_derived
+                tail = (f"({pose_derived} pose-derived fallback)"
+                        if pose_derived and not yunet_n
+                        else f"({pose_derived} pose-derived fallback)"
+                        if pose_derived else "")
                 data["envelope"] = (
                     f"{len(persons)} people · {len(faces_list or [])} "
-                    f"faces >=24px @conf .9 (far-field night cams are "
-                    f"usually below face range)")
+                    f"faces >=16px @conf .6 {tail}").strip()
             else:
                 data["envelope"] = (
                     f"{len(persons)} people · skeletons on "
@@ -2117,10 +2594,44 @@ class LiveSession(threading.Thread):
             self.events = deque(maxlen=self.EV_RING)
             self._ev = {"plates": set(), "gest": set(), "body": set(),
                         "pose": set(), "fast": set(), "cross": None,
-                        "loiter_on": set(), "spots": {}, "faces_n": 0,
-                        "faces_t": 0.0, "heat_t": 0.0}
+                        "fire_on": False, "spots": {}, "faces_n": 0,
+                        "faces_t": 0.0, "heat_t": 0.0,
+                        "obstruction": None}
         st = self._ev
         now = time.time()
+
+        # ---- Cross-layer: camera obstruction ---------------------------
+        # ModelViewProducer used to compute this badge, but it skips its
+        # whole round while _analysis_active() returns True - i.e. exactly
+        # when the operator is looking at the live tile. Moving the check
+        # inside every Advanced Analysis tick means an obstructed camera
+        # (bus parked on the lens, truck at the junction) fires the badge
+        # on the SAME layer the operator is watching, not only on the
+        # background producer. Same gate: box area >= 50% of frame with
+        # detector conf >= 0.45. Emitted once per transition, not per tick.
+        W = int(data.get("frame_w") or 0)
+        H = int(data.get("frame_h") or 0)
+        if W and H:
+            frame_area = float(W) * float(H)
+            obstructed = None
+            for b in js_boxes:
+                bw = max(0.0, float(b.get("x2", 0)) - float(b.get("x1", 0)))
+                bh = max(0.0, float(b.get("y2", 0)) - float(b.get("y1", 0)))
+                frac = (bw * bh) / frame_area if frame_area else 0.0
+                if frac >= 0.5 and float(b.get("conf") or 0.0) >= 0.45:
+                    obstructed = {"cls":  b.get("cls", "?"),
+                                  "frac": round(frac, 2),
+                                  "tid":  b.get("tid")}
+                    break
+            data["obstructed"] = obstructed
+            prev = st.get("obstruction")
+            if obstructed and obstructed != prev:
+                self._emit_event(
+                    "obstruction",
+                    f"camera obstructed: {obstructed['cls']} covers "
+                    f"{int(obstructed['frac'] * 100)}% of view")
+            st["obstruction"] = obstructed
+
         if layer == "plates":
             for b in js_boxes:
                 t = b.get("plate")
@@ -2138,15 +2649,24 @@ class LiveSession(threading.Thread):
                         self._emit_event(layer, f"crossing {d_.upper()} "
                                          f"(total {cur[d_]})")
             st["cross"] = cur
-        elif layer == "loiter":
-            for z in data.get("zones") or []:
-                name = z.get("name")
-                if z.get("alert") and name not in st["loiter_on"]:
-                    st["loiter_on"].add(name)
-                    self._emit_event(layer, f"loiter alert: {name} "
-                                     f"{int(z.get('max_dwell', 0))}s")
-                elif not z.get("alert"):
-                    st["loiter_on"].discard(name)
+        elif layer == "fire":
+            info = data.get("fire") or {}
+            confirmed = bool(info.get("confirmed"))
+            prev = bool(st.get("fire_on", False))
+            if confirmed and not prev:
+                hits = info.get("hits") or []
+                top = max(hits, key=lambda h: h.get("conf", 0)) \
+                    if hits else None
+                self._emit_event(
+                    layer,
+                    f"FIRE confirmed - {len(hits)} region(s), "
+                    f"top conf {float(top.get('conf', 0)):.2f}"
+                    if top else "FIRE confirmed",
+                    top)
+            elif prev and not confirmed:
+                self._emit_event(layer, "fire cleared - no confirmed "
+                                 "hits this tick")
+            st["fire_on"] = confirmed
         elif layer == "parking":
             for s in data.get("spots") or []:
                 name, occ = s.get("name"), bool(s.get("occupied"))
@@ -2212,8 +2732,11 @@ class LiveSession(threading.Thread):
 
     def snapshot_events(self) -> list[dict]:
         with self.lock:
+            events = getattr(self, "events", None)
+            if not events:
+                return []
             return [{k: v for k, v in e.items() if k != "_full"}
-                    for e in reversed(self.events)]
+                    for e in reversed(events)]
 
     def save_event(self, event_id: str) -> dict | None:
         """Persist one ring event (full frame) to disk for later study."""

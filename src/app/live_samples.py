@@ -26,7 +26,9 @@ import random
 import time
 from pathlib import Path
 
-from app.visual_search import SNAPSHOTS_ROOT
+# visual_search was removed with Category B; inline the constant so the
+# pool location stays stable at src/web/snapshots.
+SNAPSHOTS_ROOT = Path(__file__).resolve().parent.parent / "web" / "snapshots"
 
 LIVE_SAMPLES_SUBDIR = "live_samples"
 

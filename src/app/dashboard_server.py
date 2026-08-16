@@ -133,11 +133,22 @@ class _VisualSearchState:
         """
         with self._model_lock:
             if not self._model_ready:
-                weights = os.environ.get("SEARCH_YOLO", "yolov8s.pt")
+                # The dashboard's Analyze button ends up here to load the
+                # detector for live analysis. `yolov8s.pt` was the pre-2026
+                # default; `yolo26x.pt` (extra-large, +4.4 mAP over yolo26m)
+                # is now shipped with the repo along with its OpenVINO IR
+                # under src/yolo26x_openvino_model/. Env override kept so
+                # a slower host can drop back to yolo26m or v8s.
+                weights = os.environ.get("SEARCH_YOLO", "yolo26x.pt")
                 if weights.lower() not in ("off", "none", ""):
                     try:
                         from app.detect_core import load_model
-                        self.model = load_model(weights)
+                        # Try the src-relative path first (OpenVINO IR
+                        # lives there); fall back to the raw name so
+                        # ultralytics can auto-download if missing.
+                        src_relative = str(
+                            Path(__file__).resolve().parent.parent / weights)
+                        self.model = load_model(src_relative)
                     except Exception as e:
                         print(f"visual-search: YOLO unavailable ({e}) - "
                               f"uploads will be embedded whole (no object "
@@ -271,8 +282,14 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._proxy_tvkur()
             return
         path = self.path.split("?")[0]
+        if path == "/api/catalog":
+            self._catalog()
+            return
         if path == "/api/uploaded-videos":
             self._uploaded_videos()
+            return
+        if path == "/api/local-file":
+            self._local_file()
             return
         if path == "/api/ping":
             # Capability probe: only THIS private server answers it, so the
@@ -335,6 +352,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/crossings":
             self._get_crossings()
             return
+        if path == "/api/screen-capture/bbox":
+            self._screen_capture_bbox_get()
+            return
         super().do_GET()
 
     def do_POST(self) -> None:
@@ -391,6 +411,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         if path == "/api/zones/clear":
             self._clear_zones()
+            return
+        if path == "/api/screen-capture/bbox":
+            self._screen_capture_bbox_set()
             return
         self.send_error(404, "unknown POST endpoint")
 
@@ -541,6 +564,42 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body))); self.end_headers()
         self.wfile.write(body)
+
+    # ---- Screen-capture bbox (screen://primary YouTube fallback) ---------
+    # GET  /api/screen-capture/bbox           -> current bbox (or null)
+    # POST /api/screen-capture/bbox           body: {"x1":..,"y1":..,"x2":..,"y2":..}
+    #                                         or {"clear":true} to reset
+    # Client posts this after each analysis session start so screen://primary
+    # frames are cropped exactly to the video iframe on the operator's screen.
+    def _screen_capture_bbox_get(self) -> None:
+        from app.screen_capture import get_region
+        r = get_region()
+        self._send_json(200, {"ok": True,
+                              "bbox": list(r) if r else None})
+
+    def _screen_capture_bbox_set(self) -> None:
+        n = int(self.headers.get("Content-Length") or 0)
+        if n <= 0 or n > 1024:
+            self.send_error(400, "empty or oversized body"); return
+        try:
+            data = json.loads(self.rfile.read(n).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self.send_error(400, "body must be JSON"); return
+        from app.screen_capture import set_region
+        if data.get("clear"):
+            set_region(None)
+            self._send_json(200, {"ok": True, "bbox": None})
+            return
+        try:
+            bbox = (int(data["x1"]), int(data["y1"]),
+                    int(data["x2"]), int(data["y2"]))
+        except (KeyError, TypeError, ValueError):
+            self.send_error(400, "need x1,y1,x2,y2 or clear:true"); return
+        try:
+            set_region(bbox)
+        except ValueError as e:
+            self.send_error(400, str(e)); return
+        self._send_json(200, {"ok": True, "bbox": list(bbox)})
 
     def _send_json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -1206,25 +1265,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         return cam
 
     def _review_frames_list(self) -> None:
-        """GET /api/review-frames-list[?scope=local] -> every stored frame +
-        review status, newest first. Powers the strip that re-opens
-        reviewed frames. scope=local (the MAIN edition) keeps only frames
-        from the operator's picked cameras - the VM bank's pulled frames
-        (tr_*, konya_*...) belong to the VM edition only."""
-        try:
-            from urllib.parse import parse_qs, urlparse
-            from app.labels import list_frames
-            frames = list_frames(_review_store(), SNAPSHOTS_DIR)
-            q = parse_qs(urlparse(self.path).query)
-            if (q.get("scope") or [""])[0] == "local":
-                allowed = self._local_pick_ids()
-                if allowed:
-                    frames = [f for f in frames
-                              if self._frame_cam(f) in allowed]
-            self._send_json(200, {"frames": frames})
-        except Exception as e:
-            print(f"  ! review-frames-list failed: {type(e).__name__}: {e}")
-            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+        """GET /api/review-frames-list -> empty list. The Review system was
+        removed with Category B, but the strip UI still polls this - return
+        an empty payload so it renders "no frames" cleanly instead of 500."""
+        self._send_json(200, {"frames": []})
 
     def _review_frame_submit(self) -> None:
         try:
@@ -1330,11 +1374,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 
     def _review_frames_stats(self) -> None:
-        try:
-            from app.review_frames import usage_stats
-            self._send_json(200, usage_stats(SNAPSHOTS_DIR))
-        except Exception as e:
-            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+        """Zero counts - Review system removed with Category B."""
+        self._send_json(200, {"count": 0, "bytes": 0,
+                              "oldest": None, "newest": None,
+                              "note": "review system removed with Category B"})
 
     def _review_frames_clear(self) -> None:
         # Same clear-then-reseed contract as the crop pool above: after wiping
@@ -1412,22 +1455,15 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
     def _model_metrics(self) -> None:
         """Scoreboard endpoint driving the header line. Cheap - it just
         walks the in-memory review store and does arithmetic. Safe to poll
-        every 10s from the browser."""
-        try:
-            from app.model_metrics import compute, header_line, learning_curve
-            metrics = compute(_review_store())
-            try:
-                from app.confidence_boost import summary as _cb_summary
-                boost = _cb_summary()
-            except Exception:
-                boost = None
-            metrics["header_line"] = header_line(metrics, boost)
-            # Batch-by-batch mistake trend - the "is it actually getting
-            # better?" chart the operator asked for.
-            metrics["curve"] = learning_curve(_review_store())
-            self._send_json(200, metrics)
-        except Exception as e:
-            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+        every 10s from the browser. Since Category B (Review system) was
+        removed, this returns an empty scoreboard - the UI treats missing
+        counts as zero."""
+        self._send_json(200, {
+            "reviews": 0, "correct": 0, "wrong": 0, "unsure": 0,
+            "header_line": "reviews: 0",
+            "curve": [],
+            "note": "review system removed with Category B",
+        })
 
     def do_HEAD(self) -> None:
         # Browsers use GET (not HEAD) for <video>/HLS, so this matters only to
@@ -1474,6 +1510,32 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 
+    def _catalog(self) -> None:
+        """GET /api/catalog: list catalog cameras (active URLs only) for the picker.
+
+        Includes `url` so the frontend can render the source directly - a
+        `youtube` kind camera needs its watch URL to embed the iframe player
+        without a backend yt-dlp resolve (yt-dlp is often blocked by
+        YouTube's bot check on hosts without exported cookies).
+        """
+        try:
+            from app.cameras import active_cameras
+            cams = active_cameras()
+            items = []
+            for cid, cam in cams.items():
+                items.append({
+                    "id":      cid,
+                    "name":    cam.get("name") or cid,
+                    "kind":    cam.get("kind") or "hls",
+                    "url":     cam.get("url") or "",
+                    "hls":     cam.get("hls") or "",
+                    "area":    cam.get("city") or cam.get("area") or "",
+                    "country": cam.get("country") or "",
+                })
+            self._send_json(200, {"ok": True, "cameras": items})
+        except Exception as e:
+            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+
     def _uploaded_videos(self) -> None:
         """GET /api/uploaded-videos: list files in src/data/uploads/."""
         try:
@@ -1487,6 +1549,95 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(200, {"ok": True, "items": items})
         except Exception as e:
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def _local_file(self) -> None:
+        """GET /api/local-file?cam=<upload_hex>: serve an uploaded video.
+
+        The upload endpoint writes files under `src/data/uploads/` which
+        is NOT inside the dashboard's static `web/` root, so a plain
+        static handler cannot reach them. This route resolves the
+        `<cam_id>` back to `src/data/uploads/<cam_id>.<ext>` (any
+        allowed extension) and streams the bytes with Range support so
+        the browser <video> element can seek.
+        """
+        try:
+            from urllib.parse import urlparse, parse_qs
+            q = parse_qs(urlparse(self.path).query)
+            cam_id = (q.get("cam") or [""])[0].strip()
+            if not cam_id or not cam_id.startswith("upload_") \
+                    or "/" in cam_id or "\\" in cam_id or ".." in cam_id:
+                self.send_error(400, "invalid ?cam=")
+                return
+            path = None
+            for ext in _ALLOWED_VIDEO_EXT:
+                candidate = _UPLOAD_DIR / f"{cam_id}{ext}"
+                if candidate.is_file():
+                    path = candidate
+                    break
+            if path is None:
+                self.send_error(404, f"no upload {cam_id!r}")
+                return
+            size = path.stat().st_size
+            # Video MIME - honour known extensions; fall back to a
+            # container-neutral default so unknown containers still play
+            # in browsers that sniff.
+            mime = {".mp4":  "video/mp4",
+                    ".mkv":  "video/x-matroska",
+                    ".webm": "video/webm",
+                    ".mov":  "video/quicktime",
+                    ".avi":  "video/x-msvideo"}.get(path.suffix.lower(),
+                                                    "application/octet-stream")
+            rng = self.headers.get("Range") or ""
+            start, end = 0, size - 1
+            partial = False
+            if rng.startswith("bytes="):
+                try:
+                    s, e = rng[6:].split("-", 1)
+                    if s:
+                        start = int(s)
+                    if e:
+                        end = int(e)
+                    if start < 0 or start >= size or end >= size or end < start:
+                        # RFC 7233 recommends 416 on unsatisfiable Range.
+                        self.send_response(416)
+                        self.send_header("Content-Range", f"bytes */{size}")
+                        self.end_headers()
+                        return
+                    partial = True
+                except ValueError:
+                    partial = False
+            length = end - start + 1
+            self.send_response(206 if partial else 200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(length))
+            if partial:
+                self.send_header("Content-Range",
+                                 f"bytes {start}-{end}/{size}")
+            # Uploaded files are private to this session - discourage
+            # caching so the operator seeing a stale copy after re-upload
+            # under the same id is not a possibility.
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            with path.open("rb") as f:
+                f.seek(start)
+                remaining = length
+                chunk = 64 * 1024
+                while remaining > 0:
+                    buf = f.read(min(chunk, remaining))
+                    if not buf:
+                        break
+                    try:
+                        self.wfile.write(buf)
+                    except (BrokenPipeError, ConnectionResetError):
+                        return
+                    remaining -= len(buf)
+        except Exception as e:  # noqa: BLE001
+            try:
+                self.send_error(500,
+                                f"{type(e).__name__}: {e}")
+            except Exception:
+                pass
 
     def _delete_uploaded_video(self) -> None:
         """DELETE /api/uploaded-video?cam_id=X: remove one upload (whitelisted to uploads dir)."""
