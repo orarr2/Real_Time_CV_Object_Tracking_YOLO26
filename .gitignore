@@ -3,6 +3,9 @@
 *.pt
 *_openvino_model/
 yolo_fire.pt
+plate_ocr_global.onnx
+models/*.pb
+src/data/*.onnx
 
 # Executed notebook artifacts (run real_time_cv.ipynb yourself)
 real_time_cv_executed.ipynb

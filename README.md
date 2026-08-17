@@ -13,6 +13,34 @@ one of 10 analysis layers on top of the live video.
   footfall time-series, dwell tracking, re-ID and business score before
   binding the same dashboard inline for exploratory work.
 
+## Layer gallery
+
+Four representative backend-rendered frames, captured live on the Soi
+Green Mango (Chaweng, Koh Samui) YouTube webcam. Each frame is what the
+backend actually draws before the JPEG leaves the process; the
+dashboard's canvas overlay draws the same boxes on top of the live video
+for smoothness between backend ticks.
+
+![Body anomaly alert](docs/proof/body_anomaly_alert.jpg)
+
+*Body anomalies - kinematic verdicts per person track; the red ALERT
+banner + red halo mark a live "sudden motion" event on person #268.*
+
+![Pose skeletons](docs/proof/pose_skeletons.jpg)
+
+*Pose & skeleton - COCO-17 top-down keypoints drawn on every person crop
+tall enough for legible joints (6 of 10 people in view on this frame).*
+
+![Line crossing](docs/proof/line_crossing.jpg)
+
+*Line crossing - operator-drawn tripwire with In/Out counters that
+increment on foot-of-box side flips; 2 in, 4 out this window.*
+
+![Loitering scene](docs/proof/loitering_scene.jpg)
+
+*Zone & loitering - per-person confidence over the live stream, ready
+for operator-drawn dwell polygons.*
+
 ## Table of contents
 
 - [Quick start](#quick-start)
@@ -40,6 +68,11 @@ cd src
 python serve.py                     # opens http://localhost:8000
 ```
 
+Model weights are not shipped with the repo (see
+[Model files](#model-files)). `yolo26m.pt` and `yolov8n-pose.pt`
+auto-download on first use via `ultralytics`; the LPR + face + Re-ID
+weights need one manual fetch per fresh checkout.
+
 Alternatively:
 
 ```bash
@@ -52,8 +85,8 @@ camera you pick in the notebook's picker cell.
 ## Prerequisites
 
 - **Python 3.10 or newer** (yt-dlp dropped 3.9 support in 2025).
-- **~1 GB free disk** for the shipped model weights plus their OpenVINO IR
-  cache.
+- **~1 GB free disk** for the model weights (fetched on first run, see
+  [Model files](#model-files)) plus their OpenVINO IR cache.
 - **~2 GB free RAM** while running one live analysis session; add 200-400 MB
   per additional layer that loads its own ONNX model.
 - **Chrome, Edge or Firefox** for the dashboard (needs `hls.js` and
@@ -115,21 +148,23 @@ stream (accumulators are preserved).
 
 ## Model files
 
-| File                                         | Role                                                                     |
-| -------------------------------------------- | ------------------------------------------------------------------------ |
-| `yolo26m.pt`                                 | Primary detector (person + vehicles + train).                            |
-| `src/yolo26m_openvino_model/`                | OpenVINO IR cache for `yolo26m.pt` (2-3x faster on CPU).                 |
-| `yolov8n-plate.pt` + `_openvino_model/`      | LPR stage 1: locate plate boxes inside a vehicle crop.                   |
-| `plate_ocr_global.onnx`                      | LPR stage 2: Latin OCR (digits + A-Z, 9 slots).                          |
-| `yolov8n-pose.pt` + `_openvino_model/`       | Top-down COCO-17 keypoints on person crops.                              |
-| `models/FSRCNN_x4.pb`                        | 4x super-resolution applied to small plate / vehicle crops before OCR.   |
-| `src/data/face_detection_yunet_2023mar.onnx` | YuNet face detector (bounding boxes only).                               |
-| `src/data/osnet_x0_25_msmt17.onnx`           | OSNet re-identification embedding (falls back to HSV histogram if absent). |
+| File                                         | Role                                                                     | Where to get it |
+| -------------------------------------------- | ------------------------------------------------------------------------ | --------------- |
+| `yolo26m.pt`                                 | Primary detector (person + vehicles + train).                            | Auto-downloaded on first `YOLO("yolo26m.pt")` call by `ultralytics`. |
+| `src/yolo26m_openvino_model/`                | OpenVINO IR cache for `yolo26m.pt` (2-3x faster on CPU).                 | Built locally with `YOLO("yolo26m.pt").export(format="openvino")`. |
+| `yolov8n-plate.pt` + `_openvino_model/`      | LPR stage 1: locate plate boxes inside a vehicle crop.                   | [Koushim/yolov8-license-plate-detection](https://huggingface.co/Koushim/yolov8-license-plate-detection) (MIT). Convert with the same `export(format="openvino")` call. |
+| `plate_ocr_global.onnx`                      | LPR stage 2: Latin OCR (digits + A-Z, 9 slots).                          | [fast-plate-ocr `cct_xs_relu_v1_global`](https://github.com/ankandrew/fast-plate-ocr) (MIT). |
+| `yolov8n-pose.pt` + `_openvino_model/`       | Top-down COCO-17 keypoints on person crops.                              | Auto-downloaded on first `YOLO("yolov8n-pose.pt")` call by `ultralytics`. |
+| `models/FSRCNN_x4.pb`                        | 4x super-resolution applied to small plate / vehicle crops before OCR.   | [Saafke/FSRCNN Tensorflow](https://github.com/Saafke/FSRCNN_Tensorflow) — grab `FSRCNN_x4.pb` (Apache-2.0). |
+| `src/data/face_detection_yunet_2023mar.onnx` | YuNet face detector (bounding boxes only).                               | [opencv/opencv_zoo `face_detection_yunet_2023mar.onnx`](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet). |
+| `src/data/osnet_x0_25_msmt17.onnx`           | OSNet re-identification embedding (falls back to HSV histogram if absent). | [KaiyangZhou/deep-person-reid](https://github.com/KaiyangZhou/deep-person-reid) — export `osnet_x0_25` to ONNX. |
 
-All weights are committed to the repository so a fresh clone can serve
-the dashboard without a second download step. Non-Latin OCR (Thai,
-Arabic, Japanese) is enabled by installing `easyocr` and setting
-`PLATE_OCR_LANGS=latin,th,ar,ja`.
+Weights are **not** committed to the repository (see `.gitignore`) —
+they are large binary artifacts that live outside version control. Drop
+each file at the path listed above. The Ultralytics rows download
+themselves on first use; the rest need one manual fetch per fresh
+checkout. Non-Latin OCR (Thai, Arabic, Japanese) is enabled by
+installing `easyocr` and setting `PLATE_OCR_LANGS=latin,th,ar,ja`.
 
 ## Notebook
 
