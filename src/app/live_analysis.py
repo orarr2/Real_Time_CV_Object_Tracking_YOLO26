@@ -781,13 +781,27 @@ def draw_zones_layer(img, entries: list[dict], kind: str):
         pts = np.array([[int(p[0] * W), int(p[1] * H)]
                         for p in e["points"]], dtype=np.int32)
         if kind == "parking":
-            hot = bool(e.get("occupied"))
-            label = f"{e['name']}: {'occupied' if hot else 'free'}"
+            occ = bool(e.get("occupied"))
+            person_alert = bool(e.get("person_alert"))
+            hot = occ or person_alert
+            if person_alert:
+                label = f"{e['name']}: PERSON INSIDE (alert)"
+            else:
+                label = f"{e['name']}: {'occupied' if occ else 'free'}"
         else:
             hot = bool(e.get("alert"))
+            person_alert = False
             label = (f"{e['name']}: {e.get('count', 0)} inside"
                      f", max {int(e.get('max_dwell', 0))}s")
-        color = (0, 0, 220) if hot else (0, 200, 80)
+        # Person-in-parking uses a distinct RED (not the occupied-vehicle
+        # RED) so operators can tell "car parked" from "someone snooping
+        # around the parked car" at a glance.
+        if person_alert:
+            color = (0, 0, 255)      # bright red, more saturated than occ
+        elif hot:
+            color = (0, 0, 220)
+        else:
+            color = (0, 200, 80)
         cv2.fillPoly(overlay, [pts], color)
         cv2.polylines(img, [pts], True, color, 2, cv2.LINE_AA)
         x0, y0 = int(pts[0][0]), int(pts[0][1])
@@ -800,12 +814,15 @@ def draw_zones_layer(img, entries: list[dict], kind: str):
                 " - nothing drawn yet (use the Draw zones button)")
     elif kind == "parking":
         occ = sum(1 for e in entries if e.get("occupied"))
+        person_alerts = sum(1 for e in entries if e.get("person_alert"))
         auto_n = sum(1 for e in entries if e.get("auto"))
         source = ("auto-detected" if auto_n == len(entries)
                   else "operator-drawn" if auto_n == 0
                   else f"{auto_n} auto + {len(entries) - auto_n} manual")
-        note = (f"Parking - {occ}/{len(entries)} occupied "
-                f"({source}; state flips emit occupied / vacated events)")
+        alert_tail = (f" | PERSON ALERT in {person_alerts} spot(s)"
+                      if person_alerts else "")
+        note = (f"Parking - {occ}/{len(entries)} occupied ({source}; "
+                f"state flips emit events){alert_tail}")
     else:
         note = (f"Zone & loitering - "
                 f"{sum(e.get('count', 0) for e in entries)} inside, "
@@ -985,14 +1002,17 @@ def draw_faces_layer_img(img, faces_list: list[dict], available: bool = True):
 
 
 def draw_heat_layer(img, grid: list, since: float | None = None):
-    """Dwell overlay of the SESSION'S OWN accumulation on this camera -
-    the original (pre-"fix 3") style the operator asked to be restored:
-    TURBO colormap + Gaussian blur + signal-modulated alpha blend on top
-    of the live frame (`heatmap.overlay`), not a full-frame thermal
-    recolor. Empty street stays a photo; only where activity accumulated
-    does color bloom in."""
-    from app.heatmap import overlay
-    out = overlay(grid, base_frame=img)
+    """FULL-FRAME thermal recolor + hot-blob overlay for the heat layer.
+
+    2026-08-17: operator explicitly asked for the entire frame to
+    become a thermal view (like a real thermal-camera image), with
+    warm blobs on top marking accumulated dwell. `overlay_thermal`
+    (heatmap.py) does the two-layer composite: INFERNO base over the
+    frame's luminance, TURBO override where dwell signal is present.
+    The result reads unmistakably as "thermal" even before any dwell
+    accumulates - no more silent photo-with-nothing-on-it."""
+    from app.heatmap import overlay_thermal
+    out = overlay_thermal(grid, base_frame=img)
     if since:
         el = int(time.time() - since)
         mm, ss = divmod(el, 60)
@@ -2131,6 +2151,10 @@ class LiveSession(threading.Thread):
             self._zone_streak: dict[tuple, int] = {}
             self._zone_last_seen: dict[tuple, float] = {}
             self._spot_state: dict[int, dict] = {}
+            # 2026-08-17: per (tid, zone_idx) - has this person been
+            # flagged INSIDE this parking spot yet? Prevents an alert
+            # storm on every tick the person stays inside.
+            self._parking_person_alerted: set[tuple] = set()
         dwell_by_tid: dict[int, float] = {}
         active: set[tuple] = set()
         spot_cand: dict[int, str] = {}   # zone_idx -> vehicle cls this tick
@@ -2167,6 +2191,27 @@ class LiveSession(threading.Thread):
                             e["alert"] = True
                         dwell_by_tid[tr.tid] = max(
                             dwell_by_tid.get(tr.tid, 0.0), dw)
+            # 2026-08-17: person entering a parking polygon fires an
+            # explicit alert (operator asked for this - a person walking
+            # into a marked parking zone is exactly the "someone messing
+            # with the parked cars" trigger the layer is meant to catch).
+            # Alert fires ONCE per (person_tid, spot) so a lingering
+            # person doesn't spam the event log.
+            if tr.cls == "person" and parking:
+                fx = ((b["x1"] + b["x2"]) / 2) / W
+                fy = b["y2"] / H
+                for zi, e in parking:
+                    if _pt_in_poly(fx, fy, e["points"]):
+                        e["person_alert"] = True
+                        key_pp = (tr.tid, zi)
+                        if key_pp not in self._parking_person_alerted:
+                            self._parking_person_alerted.add(key_pp)
+                            try:
+                                self._emit_event("parking",
+                                    f"person #{tr.tid} entered spot "
+                                    f"'{e['name']}'", b)
+                            except Exception:
+                                pass  # never let the emit failure kill the tick
             if tr.cls in _VEHICLE_CLASSES and parking:
                 # Industry association: substantial AREA overlap with the
                 # spot (>=30% of the spot covered), argmax spot per
