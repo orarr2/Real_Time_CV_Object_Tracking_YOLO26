@@ -73,6 +73,13 @@ CAMERAS: dict[str, dict] = {
         "page":  "https://www.youtube.com/watch?v=UemFRPrl1hk",
         "embed": "https://www.youtube.com/embed/UemFRPrl1hk?autoplay=1&mute=1&playsinline=1&enablejsapi=1",
     },
+    "th_bophut_el_gaucho": {
+        "name":  "El Gaucho - Fisherman's Village (Bophut, Koh Samui)", "city": "Koh Samui", "country": "thailand",
+        "kind":  "youtube",
+        "url":   "https://www.youtube.com/watch?v=FyFAqPHBKiQ",
+        "page":  "https://www.youtube.com/watch?v=FyFAqPHBKiQ",
+        "embed": "https://www.youtube.com/embed/FyFAqPHBKiQ?autoplay=1&mute=1&playsinline=1&enablejsapi=1",
+    },
     "th_chaweng_pancake": {
         "name":  "Chaweng - Pancake Man (Koh Samui)", "city": "Koh Samui", "country": "thailand",
         "kind":  "youtube",
