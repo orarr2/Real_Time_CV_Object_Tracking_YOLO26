@@ -1285,6 +1285,16 @@ DEFAULT_PER_CLASS_CONF = {
     "bus":        0.35,
     "train":      0.25,
     "truck":      0.35,
+    # 2026-08-17: animals opted into LIVE_CLASSES (line layer needs to
+    # count them). Gates at 0.30 - permissive enough that a street
+    # dog / cat / horse actually clears, tight enough that texture
+    # noise doesn't hallucinate a cow on an empty road.
+    "bird":       0.30,
+    "cat":        0.30,
+    "dog":        0.30,
+    "horse":      0.30,
+    "sheep":      0.30,
+    "cow":        0.30,
 }
 
 # ---- Opt-in extra classes (EXTRA_CLASSES env) --------------------------------

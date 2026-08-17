@@ -123,13 +123,18 @@ POSE_MAX_CROPS = 6
 # - LIVE_CLASSES excludes COCO train(6)/boat/airplane at the DETECTOR so
 #   a wall can never become a train pre-NMS (street scenes only; the
 #   collector's counting path keeps its own class set untouched).
+# - Animal COCO classes (14 bird, 15 cat, 16 dog, 17 horse, 18 sheep,
+#   19 cow) added 2026-08-17: line-crossing layer must count animals
+#   too (operator report), and the extra classes are harmless to every
+#   other layer (pose/gestures/body already person-only; plates already
+#   vehicle-only; heat/paths/loiter/parking are class-agnostic).
 # - The model floor drops to 0.12 and the per-class gates are scaled by
 #   LIVE_GATE_SCALE so gate-hugging blurred pedestrians survive into the
 #   tracker, whose ByteTrack-style second stage may extend existing
 #   tracks with them (never mint new ones); DISPLAY_MIN_CONF still rules
 #   what the operator sees.
 # - agnostic NMS collapses car/truck double-boxes on one vehicle.
-LIVE_CLASSES = [0, 1, 2, 3, 5, 7]
+LIVE_CLASSES = [0, 1, 2, 3, 5, 7, 14, 15, 16, 17, 18, 19]
 LIVE_CONF_FLOOR = 0.12
 LIVE_GATE_SCALE = 0.7
 # Night profile: mean-gray below NIGHT_LUMA turns on CLAHE (the classical
@@ -994,8 +999,16 @@ def draw_heat_layer(img, grid: list, since: float | None = None):
     else:
         note = "Heat signature - dwell over this window"
     peak = max((max(row) for row in grid), default=0.0)
+    # Diagnostic: show peak + non-zero cell count on the frame so the
+    # operator can see whether backend accumulation is happening (peak
+    # rising over time = working). 2026-08-17: the layer had been
+    # reported "not working"; making the state visible in the JPEG
+    # caption itself decouples backend-accumulation debugging from
+    # frontend-canvas rendering.
+    nonzero = sum(1 for row in grid for v in row if v > 0)
+    note += f" | peak={peak:.2f}, nonzero_cells={nonzero}"
     if peak <= 0:
-        note += " - no activity banked yet"
+        note += " (no activity banked yet - wait for people to appear in frame)"
     return _caption(out, [note])
 
 
@@ -1552,13 +1565,15 @@ class LiveSession(threading.Thread):
                 layer = self.layer
                 if layer in ("pose", "gestures", "body"):
                     self._pose_pass(frame, boxes)
-                if layer == "plates" and self.cam.get("kind") != "youtube":
-                    # YouTube embeds are decoded on the client (iframe)
-                    # and the backend either grabs a screen-capture crop
-                    # (poor for LPR) or a compressed proxy JPEG - neither
-                    # gives plate pixels sharp enough for OCR. Skip the
-                    # OCR pass entirely so we don't waste inference; the
-                    # frontend envelope explains why (see below).
+                if layer == "plates":
+                    # 2026-08-17: operator wants LPR to run on live streams
+                    # regardless of kind. YouTube pixels are compressed and
+                    # OCR often fails on them, but the failure is honest
+                    # (empty plate string) and the ATTEMPT is what the
+                    # operator asked for. The old YouTube-blanket skip is
+                    # gone; a per-track cache + confidence gate inside
+                    # attach_plates still stops the pass from wasting cycles
+                    # on unreadable crops.
                     self._plates_pass(frame)
                 if layer == "parking":
                     self._parking_probe(frame)
@@ -1951,14 +1966,10 @@ class LiveSession(threading.Thread):
             _lo, pk, _dwell = self._zone_stats(frame.shape)
             return draw_zones_layer(img, pk, "parking")
         if layer == "plates":
-            # YouTube-guarded caption (2026-08-16): running the OCR pass
-            # on YouTube stream pixels wastes inference for a physically
-            # unreliable read; tell the operator instead of showing a
-            # bare unchanged frame.
-            if self.cam.get("kind") == "youtube":
-                return _caption(img, [
-                    "License plates - disabled for YouTube streams",
-                    "Upload an MP4/MKV video to test LPR (Analyze -> plates)"])
+            # 2026-08-17: LPR now attempts on any stream kind (including
+            # YouTube). Compressed pixels often defeat OCR - the caption
+            # inside draw_plates_layer says "X in range / Y read" so the
+            # operator can see the attempt rate vs the success rate live.
             return draw_plates_layer(img, visible)
         return img
 
@@ -2414,7 +2425,15 @@ class LiveSession(threading.Thread):
                                                 "motorcycle", "bicycle")),
         }
         if layer == "heat":
-            data["heat"] = self.heat
+            # Snapshot copy (list-of-list clone) so JSON serialization
+            # never sees a mid-mutation view from the tick loop that
+            # runs concurrently with the /api/analysis/data poll. Plain
+            # lists of floats - cheap.
+            data["heat"] = [list(row) for row in self.heat]
+            data["heat_peak"] = max((max(row) for row in self.heat),
+                                     default=0.0)
+            data["heat_nonzero"] = sum(1 for row in self.heat
+                                        for v in row if v > 0)
         if layer == "line":
             data["line"] = self.line
             data["cross"] = dict(self.cross)
@@ -2447,26 +2466,20 @@ class LiveSession(threading.Thread):
                 for f in (faces_list or [])]
             data["faces_ok"] = bool(self._faces_ok)
         if layer == "plates":
-            if self.cam.get("kind") == "youtube":
-                # 2026-08-16: YouTube streams either get screen-captured
-                # (unreliable pixel quality for OCR) or run through an
-                # iframe the backend cannot inspect - either way the
-                # plate pixels are physically insufficient for a Latin
-                # OCR read. Skip the pass and say so honestly.
-                data["envelope"] = (
-                    "plates layer disabled for YouTube streams - "
-                    "use Upload video to test LPR")
-            else:
-                from app.plates import MIN_VEHICLE_W, PLATE_VEHICLE_CLASSES
-                veh = [b for b in js_boxes
-                       if b["cls"] in PLATE_VEHICLE_CLASSES]
-                in_range = [b for b in veh
-                            if (b["x2"] - b["x1"]) >= MIN_VEHICLE_W]
-                read = [b for b in veh if b.get("plate")]
-                data["envelope"] = (
-                    f"{len(veh)} vehicles · {len(in_range)} in plate range "
-                    f"(>={MIN_VEHICLE_W}px wide) · {len(read)} read "
-                    f"(digits+Latin; Thai script out of alphabet)")
+            # 2026-08-17: YouTube gate removed; LPR attempts on every
+            # stream kind. Envelope now reports the real counts (vehicles
+            # in frame, in plate-range, and actually read) - operator sees
+            # attempt vs success live instead of a blanket "disabled".
+            from app.plates import MIN_VEHICLE_W, PLATE_VEHICLE_CLASSES
+            veh = [b for b in js_boxes
+                   if b["cls"] in PLATE_VEHICLE_CLASSES]
+            in_range = [b for b in veh
+                        if (b["x2"] - b["x1"]) >= MIN_VEHICLE_W]
+            read = [b for b in veh if b.get("plate")]
+            data["envelope"] = (
+                f"{len(veh)} vehicles · {len(in_range)} in plate range "
+                f"(>={MIN_VEHICLE_W}px wide) · {len(read)} read "
+                f"(digits+Latin; Thai/Arabic/Japanese script out of alphabet)")
         # Operating-envelope note per pose-family layer: how many people
         # were in scene vs how many passed the size gates, so an empty
         # overlay reads as an honest "out of range", not a failure.

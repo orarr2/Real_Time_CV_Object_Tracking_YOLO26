@@ -638,6 +638,10 @@ def active_cameras() -> dict[str, dict]:
 
 LINE_ALLOWED_CLASSES = frozenset({
     "person", "bicycle", "car", "motorcycle", "bus", "truck",
+    # 2026-08-17: animals added per operator request - the line-crossing
+    # layer now counts them alongside people + vehicles. Kept in sync
+    # with LIVE_CLASSES in live_analysis.py (COCO 14-19).
+    "bird", "cat", "dog", "horse", "sheep", "cow",
 })
 
 
