@@ -936,6 +936,27 @@ async function _postScreenCaptureBbox(st) {
 function _syncAnalysisBgVisibility(st) {
   const a = st.analysis;
   if (!a || !a.bg) return;
+
+  // 2026-08-17: heat is a special case — the colormap is BAKED into the
+  // backend JPEG by draw_heat_layer(). Trying to render it on the canvas
+  // overlay from JSON on top of the YouTube iframe hits three problems
+  // at once: (a) the JSON heat is empty until the backend has accumulated
+  // for a few ticks, (b) the iframe covers the JPEG entirely on YouTube
+  // streams, (c) double-rendering (canvas + JPEG) produces a subtly
+  // wrong result on non-YouTube. Solution: force the JPEG visible on
+  // heat regardless of video state, hide the canvas overlay entirely.
+  // The operator sees the authoritative backend-rendered heat frame.
+  if (a.layer === "heat") {
+    if (a.bg.style.display !== "block") {
+      a.bg.style.display = "block";
+      _refreshAnalysisBg(a);
+    }
+    if (a.canvas.style.display !== "none") {
+      a.canvas.style.display = "none";
+    }
+    return;
+  }
+
   let playing = false;
   // YouTube iframe (yt-dlp-independent playback): assume it's playing so
   // the backend JPEG fallback stays hidden and the canvas overlay draws
@@ -997,7 +1018,13 @@ async function pollAnalysisFrame(st) {
         }
         a.tickBuf.push(d);
         if (a.tickBuf.length > 24) a.tickBuf.shift();
-        if (a.bg && a.bg.style.display !== "none") _refreshAnalysisBg(a);
+        // Heat: bg is always visible (see _syncAnalysisBgVisibility) so
+        // refresh unconditionally to pick up the newest backend-baked
+        // colormap frame. Other layers: only refresh when bg is visible.
+        if (a.layer === "heat"
+            || (a.bg && a.bg.style.display !== "none")) {
+          _refreshAnalysisBg(a);
+        }
         // Feed the tile's activity + anomaly pills from the live-analysis
         // tick so the "-/10" placeholder becomes a real reading whenever a
         // session is running. Previously only pollLocalModelView (which
@@ -1745,40 +1772,51 @@ async function pollLocalModelView() {
 // ---------- Line editor (counting-line drawing) ---------------------------
 
 const lineEditor = document.createElement("div");
+// 2026-08-17: modal is now viewport-scroll-safe (max-height + overflow-y
+// on the inner container so the Save row is ALWAYS reachable even on
+// portrait snapshots or short laptop screens), the image is height-capped
+// so the whole modal fits on a 900px screen without hiding the buttons,
+// and the backdrop is lighter so the video underneath stays visible
+// instead of showing a "black screen".
 lineEditor.style.cssText =
-  "display:none;position:fixed;inset:0;z-index:70;background:rgba(2,6,23,.82);" +
-  "align-items:center;justify-content:center";
+  "display:none;position:fixed;inset:0;z-index:70;background:rgba(2,6,23,.55);" +
+  "align-items:center;justify-content:center;padding:16px;box-sizing:border-box";
 lineEditor.innerHTML = `
   <div style="background:#0f172a;border:1px solid #334155;border-radius:12px;
-              padding:16px 18px;max-width:800px;width:94%;color:#e2e8f0">
-    <h3 style="margin:0 0 4px;font-size:17px">Counting line -
+              padding:16px 18px;max-width:800px;width:94%;
+              max-height:92vh;overflow-y:auto;color:#e2e8f0;
+              display:flex;flex-direction:column;gap:10px">
+    <h3 style="margin:0;font-size:17px">Counting line -
       <span data-le-cam></span></h3>
-    <div style="color:#94a3b8;font-size:13px;margin-bottom:10px">
+    <div style="color:#94a3b8;font-size:13px">
       Drag on the snapshot to place a counting line. Save persists it
-      per-camera; a running Line-layer session picks it up within a few
-      seconds without a restart.</div>
+      per-camera and closes this dialog; a running Line-layer session
+      picks it up within a few seconds without a restart.</div>
     <div style="position:relative;background:#020617;border:1px solid #334155;
-                border-radius:8px;overflow:hidden">
-      <img data-le-img style="display:block;width:100%;height:auto;
+                border-radius:8px;overflow:hidden;max-height:55vh;
+                display:flex;justify-content:center;align-items:center">
+      <img data-le-img style="display:block;max-width:100%;max-height:55vh;
+                              width:auto;height:auto;object-fit:contain;
                               user-select:none;-webkit-user-drag:none">
       <canvas data-le-canvas style="position:absolute;inset:0;width:100%;
                                      height:100%;cursor:crosshair"></canvas>
     </div>
     <div data-le-classes style="display:flex;flex-wrap:wrap;gap:10px 16px;
-                                 margin-top:10px;font-size:13px;
-                                 color:#cbd5e1"></div>
-    <div style="color:#94a3b8;font-size:12px;margin-top:4px">
+                                 font-size:13px;color:#cbd5e1"></div>
+    <div style="color:#94a3b8;font-size:12px">
       Nothing checked = count every tracked class.</div>
-    <div data-le-err style="color:#f87171;font-size:13px;min-height:18px;
-                            margin-top:8px"></div>
-    <div style="display:flex;gap:10px;margin-top:6px">
+    <div data-le-err style="color:#f87171;font-size:13px;min-height:18px"></div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;
+                position:sticky;bottom:0;background:#0f172a;padding-top:6px">
       <button data-le-save style="cursor:pointer;background:#2563eb;border:0;
-              color:#fff;border-radius:8px;padding:7px 18px">Save line</button>
+              color:#fff;border-radius:8px;padding:8px 20px;font-weight:600">
+        Save &amp; Close</button>
       <button data-le-clear style="cursor:pointer;background:#334155;border:0;
-              color:#fff;border-radius:8px;padding:7px 14px">Clear override</button>
+              color:#fff;border-radius:8px;padding:8px 14px">
+        Clear override</button>
       <button data-le-cancel style="cursor:pointer;background:#1e293b;
               border:1px solid #334155;color:#e2e8f0;border-radius:8px;
-              padding:7px 14px">Close</button>
+              padding:8px 14px;margin-left:auto">Cancel</button>
     </div>
   </div>`;
 document.body.appendChild(lineEditor);
@@ -1862,9 +1900,17 @@ lineEditor.querySelector("[data-le-save]").addEventListener("click", async () =>
       body: JSON.stringify({line: _lePts, classes}),
     });
     if (!r.ok) throw new Error(await r.text());
+    // 2026-08-17: Save now auto-closes the modal on success so the
+    // operator returns to the live tile immediately - the persisted
+    // line is picked up by the running session within a few seconds
+    // via LINE_RELOAD_POLL_S.
     _leErr.style.color = "#4ade80";
-    _leErr.textContent = "Saved - a running session picks it up in a few seconds";
-    setTimeout(() => { _leErr.style.color = "#f87171"; _leErr.textContent = ""; }, 2500);
+    _leErr.textContent = "Saved - closing dialog...";
+    setTimeout(() => {
+      lineEditor.style.display = "none";
+      _leErr.style.color = "#f87171";
+      _leErr.textContent = "";
+    }, 700);
   } catch (e) {
     _leErr.style.color = "#f87171";
     _leErr.textContent = "Save failed: " + e.message;

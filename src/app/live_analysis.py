@@ -800,9 +800,12 @@ def draw_zones_layer(img, entries: list[dict], kind: str):
                 " - nothing drawn yet (use the Draw zones button)")
     elif kind == "parking":
         occ = sum(1 for e in entries if e.get("occupied"))
+        auto_n = sum(1 for e in entries if e.get("auto"))
+        source = ("auto-detected" if auto_n == len(entries)
+                  else "operator-drawn" if auto_n == 0
+                  else f"{auto_n} auto + {len(entries) - auto_n} manual")
         note = (f"Parking - {occ}/{len(entries)} occupied "
-                "(vehicle stationary in operator-drawn spot; state flips "
-                "emit occupied / vacated events)")
+                f"({source}; state flips emit occupied / vacated events)")
     else:
         note = (f"Zone & loitering - "
                 f"{sum(e.get('count', 0) for e in entries)} inside, "
@@ -1524,6 +1527,15 @@ class LiveSession(threading.Thread):
         self._zones_mtime = self._zones_json_mtime()
         self._next_zones_check = time.time() + LINE_RELOAD_POLL_S
         self._zone_since: dict[tuple, float] = {}   # (tid, zone_idx) -> t0
+        # 2026-08-17: parking layer no longer REQUIRES operator polygons.
+        # If no manual parking zones exist for this camera, the auto-
+        # parking bootstrap observes ~3 minutes of live footage, clusters
+        # stationary vehicle foot-points into a 24x14 grid, and promotes
+        # any cell that saw >= MIN_HITS stationary observations to a
+        # parking spot. Manual polygons keep their priority - if the
+        # operator draws one, the auto-inferred spots are ignored.
+        from app.auto_parking import AutoParkingBootstrap
+        self._auto_parking = AutoParkingBootstrap(self.cam_id)
         self.cross = {"in": 0, "out": 0}
         self._line_sides: dict[int, float] = {}
         self._last_cross_ts: dict[int, float] = {}
@@ -1577,6 +1589,7 @@ class LiveSession(threading.Thread):
                     self._plates_pass(frame)
                 if layer == "parking":
                     self._parking_probe(frame)
+                    self._auto_parking_tick(frame.shape, now)
                 if layer == "fire":
                     self._fire_pass(frame)
                 faces_list: list[dict] = []
@@ -1964,7 +1977,29 @@ class LiveSession(threading.Thread):
             return draw_fire_layer(img, hits, confirmed, model_err)
         if layer == "parking":
             _lo, pk, _dwell = self._zone_stats(frame.shape)
-            return draw_zones_layer(img, pk, "parking")
+            out = draw_zones_layer(img, pk, "parking")
+            # If auto-parking is still bootstrapping and no spots exist
+            # yet, overwrite the default "nothing drawn yet" caption with
+            # progress info so the operator sees what is happening (no
+            # more silent 3-minute wait).
+            if not pk:
+                ap = getattr(self, "_auto_parking", None)
+                if ap is not None:
+                    st = ap.status(time.time())
+                    if not st["done"]:
+                        el = int(st["elapsed"])
+                        rem = int(st["remaining"])
+                        return _caption(out, [
+                            f"Parking auto-detect - observing stationary "
+                            f"vehicles ({el}s elapsed, ~{rem}s remaining, "
+                            f"{st['candidate_cells']} candidate cells so far)"])
+                    else:
+                        return _caption(out, [
+                            "Parking auto-detect - bootstrap done but no "
+                            "spots emerged (no vehicles parked long enough "
+                            "during the window). Move the camera or draw "
+                            "manual polygons via the Draw zones button."])
+            return out
         if layer == "plates":
             # 2026-08-17: LPR now attempts on any stream kind (including
             # YouTube). Compressed pixels often defeat OCR - the caption
@@ -1992,6 +2027,30 @@ class LiveSession(threading.Thread):
         else:
             self._fire_streak = 0
         self._fire_confirmed = self._fire_streak >= FIRE_CONFIRM_TICKS
+
+    def _auto_parking_tick(self, frame_shape: tuple, now: float) -> None:
+        """Feed one tick's stationary vehicles into the bootstrap grid.
+        When the operator has already drawn parking polygons manually,
+        auto-detection is skipped entirely (manual wins). Otherwise:
+        sample -> emerge (after ~3 min) -> the inferred spots are
+        merged into self.zones for the standard draw + occupancy path.
+        """
+        manual_parking = any(z.get("kind") == "parking"
+                              and not z.get("auto")
+                              for z in (self.zones or []))
+        if manual_parking:
+            return
+        ap = getattr(self, "_auto_parking", None)
+        if ap is None or self.tracker is None:
+            return
+        ap.sample(self.tracker.open, frame_shape, now)
+        emerged = ap.to_zones(now)
+        if emerged:
+            # Idempotent merge: replace any existing auto entries with
+            # the (possibly grown) fresh set. Manual zones are already
+            # ruled out above so no interleave conflict.
+            self.zones = [z for z in (self.zones or []) if not z.get("auto")]
+            self.zones.extend(emerged)
 
     def _parking_probe(self, frame) -> None:
         """Trackerless occupancy assist (parking layer only): re-detect
