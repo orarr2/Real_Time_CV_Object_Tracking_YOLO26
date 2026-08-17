@@ -1,5 +1,13 @@
 """License-plate reading (LPR) on top of vehicle detections - layer 10.
 
+Every plate crop that reaches the OCR stage is also written to disk
+(src/data/plate_crops/<cam>/<ts>_<tid>_<text_or_UNREAD>.jpg) so the
+operator can post-hoc verify low-confidence reads or eyeball an
+unreadable one manually. Saves happen even when OCR returns nothing -
+the "UNREAD" suffix is deliberate so a folder listing highlights the
+plates the pipeline still owes an answer for.
+
+
 Scope, stated up front: this reads the PLATE STRING of vehicles the
 detector already found. It keeps no plate database, matches nothing
 against watchlists, and adds no new heavy dependency - both models ride
@@ -34,8 +42,24 @@ vehicle is close enough.
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
+from pathlib import Path
+
+# On-disk audit trail for plate crops. Every attempted crop lands in
+# src/data/plate_crops/<cam>/<ts>_<tid>_<text_or_UNREAD>.jpg regardless
+# of OCR outcome, so the operator can go back later and eyeball what
+# the pipeline saw when a read failed or landed at low confidence. Path
+# is a sibling of the other src/data/ artifacts (zones, lines, events).
+_PLATE_CROPS_ROOT = (Path(__file__).resolve().parent.parent
+                     / "data" / "plate_crops")
+# Per-track write throttle: a busy street can push the same tid through
+# many plate ticks. Cap at one saved crop per PLATE_CROP_MIN_INTERVAL_S
+# so a single parked scooter doesn't drown the folder.
+PLATE_CROP_MIN_INTERVAL_S = 2.0
+_PLATE_CROPS_LAST_SAVE: dict[tuple[str, int], float] = {}
+_PLATE_FILENAME_SAFE = re.compile(r"[^0-9A-Za-z_-]+")
 
 # Weights: bare names resolve against the process CWD (the project root,
 # same convention as the detection/pose weights). Both are gitignored
@@ -362,8 +386,41 @@ def load_ocr(path: str | None = None) -> _MultiScriptOcr:
     return _ocr
 
 
+def _save_plate_crop(cam_id: str, tid: int, plate_bgr,
+                     text: str, conf: float, now: float) -> None:
+    """Persist a plate crop for post-hoc verification.
+
+    Filename encodes wall-clock timestamp, track id, and the OCR text
+    (or "UNREAD" when the read failed) so a directory listing tells
+    the operator which pipeline attempts still owe an answer without
+    opening every JPEG. Silent-on-failure by design - the audit trail
+    is a nice-to-have, not a session-critical dependency.
+    """
+    if not cam_id or plate_bgr is None or plate_bgr.size == 0:
+        return
+    key = (cam_id, tid)
+    last = _PLATE_CROPS_LAST_SAVE.get(key, 0.0)
+    if now - last < PLATE_CROP_MIN_INTERVAL_S:
+        return
+    _PLATE_CROPS_LAST_SAVE[key] = now
+    safe_cam = _PLATE_FILENAME_SAFE.sub("_", cam_id) or "cam"
+    safe_text = _PLATE_FILENAME_SAFE.sub("_", (text or "UNREAD")) or "UNREAD"
+    ts = int(now * 1000)
+    conf_tag = int(round(conf * 100)) if conf else 0
+    fname = f"{ts}_{tid}_{safe_text}_{conf_tag:02d}.jpg"
+    dest = _PLATE_CROPS_ROOT / safe_cam / fname
+    try:
+        import cv2
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(dest), plate_bgr)
+    except Exception:
+        # Never let a disk hiccup kill the OCR pass - the operator
+        # would rather have live reads than a strict audit trail.
+        pass
+
+
 def attach_plates(det_model, ocr: "_MultiScriptOcr", frame, tracker,
-                  reads: dict) -> tuple[int, int]:
+                  reads: dict, cam_id: str | None = None) -> tuple[int, int]:
     """Read plates for the tracker's open vehicle tracks, in place.
 
     `reads` is the session's per-track cache: tid -> {"text", "conf",
@@ -523,4 +580,16 @@ def attach_plates(det_model, ocr: "_MultiScriptOcr", frame, tracker,
             b["plate"] = best_text
             b["plate_conf"] = entry["conf"]
             b["plate_box"] = [x1 + px1, y1 + py1, x1 + px2, y1 + py2]
+        # Persist the FRESHEST crop for this tick, whatever OCR did with
+        # it. The best-effort save uses either the read the pipeline
+        # just decided on OR the accumulated best-so-far for this track;
+        # either way an operator opening the folder later has a real
+        # crop to look at rather than only a filename.
+        _display_text = (entry.get("text") if entry.get("text")
+                         else best_text)
+        _display_conf = (entry.get("conf") if entry.get("text")
+                         else best_conf)
+        _save_plate_crop(cam_id or "", tid, plate,
+                         _display_text or "", _display_conf or 0.0,
+                         time.time())
     return in_range, new_reads

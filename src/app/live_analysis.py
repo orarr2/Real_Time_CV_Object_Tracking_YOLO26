@@ -108,7 +108,12 @@ DISPLAY_MIN_CONF = 0.32    # was 0.40; night street scenes carry a wide
                            # tracker's two-stage association still cleans
                            # false positives before the display gate.
 DISPLAY_MAX_MISSES = 1     # allow 1-tick coasting through brief occlusion
-DISPLAY_CLASS_BLACKLIST = {"train", "boat", "airplane"}
+# 2026-08-17: train removed from the display blacklist - the operator
+# now opts trains INTO the live detector via LIVE_CLASSES (see below),
+# and the line layer counts them as a first-class channel. boat and
+# airplane stay out because the street cams looking at rail/road never
+# actually see them, so any hit is a class-confused hallucination.
+DISPLAY_CLASS_BLACKLIST = {"boat", "airplane"}
 # Below this person-box height (px) skeletons are guesswork, so kps are
 # neither PUBLISHED nor COMPUTED: the pose pass crops only boxes at least
 # this tall. One constant keeps compute aligned with the display gate -
@@ -120,21 +125,26 @@ KPS_MIN_BOX_H = 96
 POSE_MAX_CROPS = 6
 
 # Live-analysis detector envelope (2026-08 industry pass):
-# - LIVE_CLASSES excludes COCO train(6)/boat/airplane at the DETECTOR so
-#   a wall can never become a train pre-NMS (street scenes only; the
+# - LIVE_CLASSES excludes COCO boat/airplane at the DETECTOR so
+#   a wall can never become a boat pre-NMS (street scenes only; the
 #   collector's counting path keeps its own class set untouched).
 # - Animal COCO classes (14 bird, 15 cat, 16 dog, 17 horse, 18 sheep,
 #   19 cow) added 2026-08-17: line-crossing layer must count animals
-#   too (operator report), and the extra classes are harmless to every
-#   other layer (pose/gestures/body already person-only; plates already
+#   too (operator report). All six surface under the single "animal"
+#   label via detect_core.NAME_BY_ID - one bucket rather than six
+#   sparse ones. Extra classes are harmless to every other layer
+#   (pose/gestures/body already person-only; plates already
 #   vehicle-only; heat/paths/loiter/parking are class-agnostic).
+# - train (6) added 2026-08-17: rail-facing cameras were losing tram
+#   crossings entirely; the class ships under the "train" label and
+#   is out of the display blacklist above.
 # - The model floor drops to 0.12 and the per-class gates are scaled by
 #   LIVE_GATE_SCALE so gate-hugging blurred pedestrians survive into the
 #   tracker, whose ByteTrack-style second stage may extend existing
 #   tracks with them (never mint new ones); DISPLAY_MIN_CONF still rules
 #   what the operator sees.
 # - agnostic NMS collapses car/truck double-boxes on one vehicle.
-LIVE_CLASSES = [0, 1, 2, 3, 5, 7, 14, 15, 16, 17, 18, 19]
+LIVE_CLASSES = [0, 1, 2, 3, 5, 6, 7, 14, 15, 16, 17, 18, 19]
 LIVE_CONF_FLOOR = 0.12
 LIVE_GATE_SCALE = 0.7
 # Night profile: mean-gray below NIGHT_LUMA turns on CLAHE (the classical
@@ -218,6 +228,81 @@ BODY_SUDDEN_COOLDOWN_S = 3.0      # do not re-flag the same tid for N s
 # person that pose isn't even trying to score.
 BODY_BBOX_SUDDEN_FRAC = 0.35
 BODY_BBOX_SUDDEN_MIN_SAMPLES = 3
+
+
+# ---- Append-only event sink (2026-08-17) -------------------------------
+# Every _emit_event call from a running session lands here as one JSON
+# line: {"ts", "cam", "layer", "text", "box"|null}. Downstream:
+#   * /api/events.jsonl streams the raw log (newest-first, capped).
+#   * /api/export.csv turns it into a CSV suitable for spreadsheets.
+# The sink is a single append per call - the write is short and file
+# locks are handled by the OS's O_APPEND semantics; readers can tail
+# the file safely without coordination. Rotated when the file grows
+# past _EVENTS_MAX_BYTES so a long-lived session cannot balloon the
+# operator's disk.
+_EVENTS_DIR = _SRC_ROOT / "data" / "events"
+_EVENTS_MAX_BYTES = 2_000_000     # ~2 MB per camera before rotation
+_EVENTS_KEEP_LINES = 4000         # trim to the newest N lines on rotation
+
+
+def _events_path(cam_id: str) -> Path:
+    safe = "".join(ch if (ch.isalnum() or ch in "-_") else "_"
+                   for ch in (cam_id or "cam"))
+    return _EVENTS_DIR / f"{safe}.jsonl"
+
+
+def _append_event_jsonl(cam_id: str, layer: str, text: str,
+                        box: dict | None = None) -> None:
+    """Append one event line to the sink. Silent-on-failure - a disk
+    hiccup must never take down a running detection tick."""
+    try:
+        _EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+        p = _events_path(cam_id)
+        payload = {
+            "ts": time.time(),
+            "iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "cam": cam_id,
+            "layer": layer,
+            "text": text,
+            "box": ({"x1": float(box["x1"]),
+                     "y1": float(box["y1"]),
+                     "x2": float(box["x2"]),
+                     "y2": float(box["y2"]),
+                     "cls": box.get("cls"),
+                     "tid": box.get("tid")}
+                    if box else None),
+        }
+        with p.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        # Rotate when the file grows too large. Keep the newest slice so
+        # the CSV export continues to see recent history after the trim.
+        if p.stat().st_size > _EVENTS_MAX_BYTES:
+            keep = p.read_text(encoding="utf-8").splitlines()[-_EVENTS_KEEP_LINES:]
+            p.write_text("\n".join(keep) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def read_events(cam_id: str, limit: int = 500) -> list[dict]:
+    """Return the newest `limit` events for a camera, oldest-first
+    within the returned slice. Missing sink = []."""
+    p = _events_path(cam_id)
+    if not p.exists():
+        return []
+    try:
+        lines = p.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out: list[dict] = []
+    for line in lines[-max(1, int(limit)):]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return out
 
 
 class BusyError(RuntimeError):
@@ -1053,14 +1138,16 @@ def draw_heat_layer(img, grid: list, since: float | None = None):
 
 
 def draw_line_layer(img, line: list, cross: dict):
-    """Counting line + BIG top-center IN/OUT counter (2026-08-16).
+    """Counting line + BOTTOM-LEFT IN/OUT counters (2026-08-17).
 
-    Old placement painted small yellow "IN N OUT N" text next to the
-    line's midpoint, which for a mid-height line sat squarely under
-    YouTube's own hover controls and was invisible during playback. The
-    counter now anchors top-center with 48pt glowing text - green for IN,
-    red for OUT - so the operator reads it at a glance regardless of
-    where the operator drew the line.
+    Placement history: originally near the line midpoint (invisible under
+    YouTube hover controls); then top-center (competed with the layer
+    title strip and any browser overlay chrome). Now bottom-left in two
+    separate color-coded pills - IN in a green pill, OUT in a red pill -
+    so the operator can scan the state at a glance without the readout
+    fighting the tile's own Stop / Draw-line control row above the frame.
+    Each pill sits its own gap apart so the two counters read as two
+    distinct channels rather than one glyph blob.
     """
     import cv2
     H, W = img.shape[:2]
@@ -1070,41 +1157,71 @@ def draw_line_layer(img, line: list, cross: dict):
     cv2.line(img, p0, p1, (0, 215, 255), 3, cv2.LINE_AA)
     for p in (p0, p1):
         cv2.circle(img, p, 6, (0, 215, 255), -1, cv2.LINE_AA)
+    # Direction hint - a small arrowhead near B pointing perpendicular
+    # to A->B, on the "positive" (IN) side. Line dir is A->B; rotate
+    # 90 degrees anti-clockwise for the IN-normal. Helps the operator
+    # see which side the "in" count corresponds to before crossings
+    # start accumulating.
+    dxl, dyl = (bx - ax) * W, (by - ay) * H
+    mag = (dxl * dxl + dyl * dyl) ** 0.5
+    if mag > 8:
+        nx, ny = -dyl / mag, dxl / mag        # rotate +90 (screen-space)
+        cx, cy = (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2
+        tip = (int(cx + nx * 22), int(cy + ny * 22))
+        base = (int(cx), int(cy))
+        cv2.arrowedLine(img, base, tip, (0, 200, 60), 2, cv2.LINE_AA,
+                        tipLength=0.35)
     n_in = int(cross.get("in", 0))
     n_out = int(cross.get("out", 0))
-    # Big top-center readout: font size scales with frame width (48pt at
-    # 960px, floors at 24pt for tiny embeds). One draw for green IN + gap
-    # + red OUT so operators see both channels side-by-side.
-    fs = max(0.9, min(1.8, W / 960.0 * 1.4))
-    thick = 3 if fs >= 1.0 else 2
+    # Font size scales with frame width (matches the previous top-center
+    # readout so the numbers stay readable on both small embeds and
+    # dashboard-full views).
+    fs = max(0.7, min(1.4, W / 960.0 * 1.05))
+    thick = 2 if fs >= 1.0 else 2
     txt_in = f"IN {n_in}"
-    txt_sep = "   "
     txt_out = f"OUT {n_out}"
     (tw_i, th_i), _ = cv2.getTextSize(txt_in, cv2.FONT_HERSHEY_SIMPLEX,
                                        fs, thick)
     (tw_o, th_o), _ = cv2.getTextSize(txt_out, cv2.FONT_HERSHEY_SIMPLEX,
                                        fs, thick)
-    (tw_s, _), _ = cv2.getTextSize(txt_sep, cv2.FONT_HERSHEY_SIMPLEX,
-                                    fs, thick)
-    total_w = tw_i + tw_s + tw_o
-    text_h = max(th_i, th_o)
-    x0 = max(8, (W - total_w) // 2)
-    y0 = max(8, int(text_h * 0.55))
-    # Dark backdrop so the glow reads on bright frames too.
-    cv2.rectangle(img, (x0 - 14, 4),
-                  (min(W - 4, x0 + total_w + 14), y0 + int(text_h * 0.7)),
-                  (18, 18, 18), -1)
-    # Glow pass (semi-transparent thick stroke) + solid text on top.
-    for extra in (thick + 4, thick):
-        col_in = (0, 200, 60) if extra == thick else (0, 90, 30)
-        col_out = (60, 60, 220) if extra == thick else (30, 30, 90)
-        cv2.putText(img, txt_in, (x0, y0 + text_h),
-                    cv2.FONT_HERSHEY_SIMPLEX, fs, col_in, extra,
-                    cv2.LINE_AA)
-        cv2.putText(img, txt_out, (x0 + tw_i + tw_s, y0 + text_h),
-                    cv2.FONT_HERSHEY_SIMPLEX, fs, col_out, extra,
-                    cv2.LINE_AA)
-    # No top strip caption on this layer - the big readout replaces it.
+    pad_x, pad_y = 10, 6
+    gap = 8
+    pill_h_i = th_i + pad_y * 2
+    pill_h_o = th_o + pad_y * 2
+    pill_h = max(pill_h_i, pill_h_o)
+    # Bottom-left anchor - stack IN pill above OUT pill so each reads
+    # in its own color band.
+    margin = 12
+    y_bot = H - margin
+    y_top_out = y_bot - pill_h
+    y_top_in = y_top_out - gap - pill_h
+    x_left = margin
+    # IN pill (green fill, white text).
+    cv2.rectangle(img,
+                  (x_left, y_top_in),
+                  (x_left + tw_i + pad_x * 2, y_top_in + pill_h),
+                  (0, 165, 45), -1)
+    cv2.rectangle(img,
+                  (x_left, y_top_in),
+                  (x_left + tw_i + pad_x * 2, y_top_in + pill_h),
+                  (0, 90, 25), 1, cv2.LINE_AA)
+    cv2.putText(img, txt_in,
+                (x_left + pad_x, y_top_in + pad_y + th_i),
+                cv2.FONT_HERSHEY_SIMPLEX, fs, (255, 255, 255), thick,
+                cv2.LINE_AA)
+    # OUT pill (red fill, white text).
+    cv2.rectangle(img,
+                  (x_left, y_top_out),
+                  (x_left + tw_o + pad_x * 2, y_top_out + pill_h),
+                  (55, 55, 205), -1)
+    cv2.rectangle(img,
+                  (x_left, y_top_out),
+                  (x_left + tw_o + pad_x * 2, y_top_out + pill_h),
+                  (25, 25, 90), 1, cv2.LINE_AA)
+    cv2.putText(img, txt_out,
+                (x_left + pad_x, y_top_out + pad_y + th_o),
+                cv2.FONT_HERSHEY_SIMPLEX, fs, (255, 255, 255), thick,
+                cv2.LINE_AA)
     return img
 
 
@@ -1768,7 +1885,8 @@ class LiveSession(threading.Thread):
             self._plate_reads: dict[int, dict] = {}
         try:
             attach_plates(load_plate_model(), load_ocr(), frame,
-                          self.tracker, self._plate_reads)
+                          self.tracker, self._plate_reads,
+                          cam_id=self.cam_id)
         except Exception as e:
             # A missing/corrupt model must degrade to an honest empty
             # layer, not kill the session.
@@ -2721,6 +2839,10 @@ class LiveSession(threading.Thread):
     EV_RING = 50
 
     def _emit_event(self, layer: str, text: str, box: dict | None = None):
+        # Persist the raw event to the on-disk sink FIRST - even if the
+        # frame is None (a caption-only alert), the event still belongs
+        # in the append-only log the CSV export reads from.
+        _append_event_jsonl(self.cam_id, layer, text, box)
         import base64
         import cv2
         frame = getattr(self, "_last_frame", None)

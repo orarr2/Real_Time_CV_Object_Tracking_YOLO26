@@ -569,7 +569,31 @@ function beginTileAnalysis(st, cam, layer) {
             style="position:absolute;right:8px;bottom:8px;padding:6px 12px;
                    background:#dc2626;color:#f8fafc;border:0;border-radius:6px;
                    cursor:pointer;font-size:13px;pointer-events:auto;">
-      Stop</button>`;
+      Stop</button>
+    <div class="analysis-hud"
+         style="position:absolute;left:8px;top:44px;min-width:160px;
+                padding:8px 10px;background:rgba(2,6,23,0.72);
+                color:#e2e8f0;border:1px solid rgba(148,163,184,0.35);
+                border-radius:8px;font:12px/1.35 system-ui, sans-serif;
+                pointer-events:none;backdrop-filter:blur(4px);
+                display:grid;grid-template-columns:auto auto;
+                column-gap:12px;row-gap:3px;
+                box-shadow:0 6px 22px rgba(0,0,0,.35)">
+      <span style="color:#94a3b8">People</span>
+        <b class="hud-people" style="text-align:right;color:#4ade80">-</b>
+      <span style="color:#94a3b8">Vehicles</span>
+        <b class="hud-veh"    style="text-align:right;color:#60a5fa">-</b>
+      <span style="color:#94a3b8">Tick</span>
+        <b class="hud-tick"   style="text-align:right;color:#fbbf24">-</b>
+      <span style="color:#94a3b8">Alerts</span>
+        <b class="hud-alerts" style="text-align:right;color:#f97316">0</b>
+      <span style="color:#94a3b8">Model</span>
+        <b class="hud-model"  style="text-align:right;color:#cbd5e1">-</b>
+      <span style="color:#94a3b8">Camera</span>
+        <b class="hud-cam"    style="text-align:right;color:#cbd5e1;
+           max-width:160px;overflow:hidden;text-overflow:ellipsis;
+           white-space:nowrap" title="${escapeHtml(cam)}">${escapeHtml(cam)}</b>
+    </div>`;
   st.videoWrap.style.position = st.videoWrap.style.position || "relative";
   st.videoWrap.appendChild(wrap);
   wrap.querySelector(".analysis-stop").addEventListener("click",
@@ -645,10 +669,14 @@ async function pollAnalysisEvents(st) {
   const chips = a.evStrip.querySelectorAll(".event-chip");
   for (let i = 30; i < chips.length; i++) chips[i].remove();
   const cur = a.actualLayer || a.layer;
+  let visible = 0;
   for (const c of a.evStrip.querySelectorAll(".event-chip")) {
-    c.style.display = (!c.dataset.layer || c.dataset.layer === cur)
-      ? "" : "none";
+    const show = (!c.dataset.layer || c.dataset.layer === cur);
+    c.style.display = show ? "" : "none";
+    if (show) visible += 1;
   }
+  try { _updateAnalysisHudAlerts(a, visible); }
+  catch (_) { /* HUD is decorative */ }
 }
 
 function _eventChip(a, ev) {
@@ -933,6 +961,90 @@ async function _postScreenCaptureBbox(st) {
   } catch (_) { /* best-effort - fallback keeps working full-screen */ }
 }
 
+// Premium HUD sidebar (2026-08-17). Reads from the tick payload +
+// backend /api/system chip so the operator sees the live pulse of the
+// analysis (people, vehicles, tick rate, alert count, active model
+// backend, camera id) without opening a dev console. Non-invasive:
+// the HUD lives INSIDE the analysis-wrap overlay, so it appears only
+// while a session is live and vanishes as soon as Stop is clicked.
+let _hudSystemInfo = null;
+let _hudSystemInflight = false;
+
+function _hudLoadSystemInfo() {
+  if (_hudSystemInfo !== null || _hudSystemInflight) return;
+  _hudSystemInflight = true;
+  fetch("/api/system", { cache: "no-store" })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j) => {
+      _hudSystemInflight = false;
+      if (!j) return;
+      _hudSystemInfo = j;
+      // Refresh any live HUD tiles with the model chip we just learned.
+      for (const key of Object.keys(tileState || {})) {
+        const st = tileState[key];
+        const a = st && st.analysis;
+        if (!a || !a.wrap) continue;
+        const m = a.wrap.querySelector(".hud-model");
+        if (m) m.textContent = _hudSystemInfo.model || "-";
+      }
+      // Populate the top-right capability chip once - color the
+      // background by backend so an OpenVINO GPU install jumps out
+      // relative to plain CPU torch. The chip stays hidden when
+      // /api/system fails so a stale label is never displayed.
+      const chip = document.getElementById("backend-chip");
+      if (chip) {
+        chip.textContent = _hudSystemInfo.model || _hudSystemInfo.backend;
+        chip.title = "device: " + (_hudSystemInfo.device || "?");
+        chip.style.display = "";
+        const bk = _hudSystemInfo.backend;
+        const dev = _hudSystemInfo.device || "";
+        if (bk === "openvino" && dev.startsWith("GPU")) {
+          chip.style.background = "#052e16";  // green - fast + accelerated
+          chip.style.borderColor = "#166534";
+          chip.style.color = "#bbf7d0";
+        } else if (bk === "openvino") {
+          chip.style.background = "#082f49";  // blue - fast CPU path
+          chip.style.borderColor = "#075985";
+          chip.style.color = "#bae6fd";
+        } else {
+          chip.style.background = "#292524";  // amber - plain torch
+          chip.style.borderColor = "#78350f";
+          chip.style.color = "#fed7aa";
+        }
+      }
+    })
+    .catch(() => { _hudSystemInflight = false; });
+}
+_hudLoadSystemInfo();
+
+function _updateAnalysisHud(a, d) {
+  if (!a || !a.wrap) return;
+  const p = a.wrap.querySelector(".hud-people");
+  const v = a.wrap.querySelector(".hud-veh");
+  const t = a.wrap.querySelector(".hud-tick");
+  const m = a.wrap.querySelector(".hud-model");
+  if (p) p.textContent = String(d.person ?? "-");
+  if (v) v.textContent = String(d.vehicles ?? "-");
+  if (t) {
+    // Prefer the smoothed inter-tick gap the client already tracks
+    // (a._gapEma); fall back to a per-tick delta when only two ticks
+    // exist. Rendered as SECONDS with one decimal - "0.9s" reads more
+    // clearly than the FPS reciprocal on a CPU-only pipeline where a
+    // tick often runs 0.5-4s apart.
+    const gap = a._gapEma || null;
+    t.textContent = gap ? gap.toFixed(1) + "s / tick" : "-";
+  }
+  if (m && _hudSystemInfo && _hudSystemInfo.model) {
+    m.textContent = _hudSystemInfo.model;
+  }
+}
+
+function _updateAnalysisHudAlerts(a, count) {
+  if (!a || !a.wrap) return;
+  const el = a.wrap.querySelector(".hud-alerts");
+  if (el) el.textContent = String(count);
+}
+
 function _syncAnalysisBgVisibility(st) {
   const a = st.analysis;
   if (!a || !a.bg) return;
@@ -1039,6 +1151,8 @@ async function pollAnalysisFrame(st) {
             obstructed: d.obstructed,
           });
         } catch (_) { /* pills are decorative - never break the poll */ }
+        try { _updateAnalysisHud(a, d); }
+        catch (_) { /* HUD is decorative - never break the poll */ }
         if (d.layer === "fire" && d.fire) {
           const confirmed = !!d.fire.confirmed;
           const prev = !!a._fireConfirmed;
@@ -1825,6 +1939,10 @@ lineEditor.innerHTML = `
       <button data-le-save style="cursor:pointer;background:#2563eb;border:0;
               color:#fff;border-radius:8px;padding:9px 22px;font-weight:600">
         Save &amp; Close</button>
+      <button data-le-flip style="cursor:pointer;background:#0369a1;border:0;
+              color:#fff;border-radius:8px;padding:9px 14px" title=
+              "Swap the two line endpoints so IN/OUT reverse">
+        Flip direction</button>
       <button data-le-clear style="cursor:pointer;background:#334155;border:0;
               color:#fff;border-radius:8px;padding:9px 14px">
         Clear override</button>
@@ -1902,6 +2020,26 @@ window.addEventListener("resize", _leDraw);
 
 lineEditor.querySelector("[data-le-cancel]").addEventListener("click",
   () => { lineEditor.style.display = "none"; });
+
+lineEditor.querySelector("[data-le-flip]").addEventListener("click", () => {
+  // Swap the two endpoints so the crossing direction reverses. IN
+  // (neg->pos cross of A->B) becomes OUT after the swap. Purely
+  // client-side; nothing is persisted until Save fires with the new
+  // point order.
+  if (_lePts.length !== 2) {
+    _leErr.style.color = "#f87171";
+    _leErr.textContent = "Draw a line first, then flip.";
+    return;
+  }
+  _lePts = [_lePts[1], _lePts[0]];
+  _leDraw();
+  _leErr.style.color = "#4ade80";
+  _leErr.textContent = "Direction flipped - Save to persist.";
+  setTimeout(() => {
+    _leErr.style.color = "#f87171";
+    _leErr.textContent = "";
+  }, 1500);
+});
 
 lineEditor.querySelector("[data-le-save]").addEventListener("click", async () => {
   _leErr.textContent = "";
@@ -2000,24 +2138,46 @@ zoneEditor.style.cssText =
   "align-items:center;justify-content:center";
 zoneEditor.innerHTML = `
   <div style="background:#0f172a;border:1px solid #334155;border-radius:12px;
-              padding:16px 18px;max-width:800px;width:94%;color:#e2e8f0">
+              padding:16px 18px;max-width:960px;width:96%;color:#e2e8f0;
+              max-height:92vh;display:flex;flex-direction:column">
     <h3 style="margin:0 0 4px;font-size:17px"><span data-ze-title></span> -
       <span data-ze-cam></span></h3>
     <div style="color:#94a3b8;font-size:13px;margin-bottom:10px">
       Click the snapshot to drop polygon corners; double-click (or the
-      button) closes the shape. Repeat for more zones, then Save.</div>
-    <div style="position:relative;background:#020617;border:1px solid #334155;
-                border-radius:8px;overflow:hidden">
-      <img data-ze-img style="display:block;width:100%;height:auto;
-                              user-select:none;-webkit-user-drag:none">
-      <canvas data-ze-canvas style="position:absolute;inset:0;width:100%;
-                                     height:100%;cursor:crosshair"></canvas>
+      button) closes the shape. The list on the right shows every saved
+      zone - rename or delete individual ones there, then Save.</div>
+    <div style="display:grid;grid-template-columns:minmax(0,1fr) 260px;
+                gap:14px;flex:1 1 auto;overflow:hidden">
+      <div>
+        <div style="position:relative;background:#020617;
+                    border:1px solid #334155;border-radius:8px;overflow:hidden">
+          <img data-ze-img style="display:block;width:100%;height:auto;
+                                  user-select:none;-webkit-user-drag:none">
+          <canvas data-ze-canvas style="position:absolute;inset:0;width:100%;
+                                         height:100%;cursor:crosshair"></canvas>
+        </div>
+        <div data-ze-dwellrow style="margin-top:10px;font-size:13px;
+                                      color:#cbd5e1">
+          Loiter alert after <input data-ze-dwell type="number" min="5"
+            max="3600" value="30" style="width:70px;background:#1e293b;
+            color:#e2e8f0;border:1px solid #334155;border-radius:6px;
+            padding:3px 6px"> seconds inside a zone.</div>
+      </div>
+      <div style="background:#0b1220;border:1px solid #1e293b;border-radius:8px;
+                  padding:8px;display:flex;flex-direction:column;
+                  overflow:hidden;min-height:0">
+        <div style="font-size:12px;color:#94a3b8;padding:2px 4px 6px;
+                    border-bottom:1px solid #1e293b;margin-bottom:6px">
+          Saved zones (<span data-ze-count>0</span>)
+        </div>
+        <div data-ze-list style="overflow-y:auto;display:flex;flex-direction:
+                                  column;gap:4px;flex:1 1 auto;min-height:0"></div>
+        <div style="color:#64748b;font-size:11px;padding:6px 4px 0;
+                    border-top:1px solid #1e293b;margin-top:6px">
+          Deletions and renames apply on Save. Cancel throws them away.
+        </div>
+      </div>
     </div>
-    <div data-ze-dwellrow style="margin-top:10px;font-size:13px;color:#cbd5e1">
-      Loiter alert after <input data-ze-dwell type="number" min="5" max="3600"
-        value="30" style="width:70px;background:#1e293b;color:#e2e8f0;
-        border:1px solid #334155;border-radius:6px;padding:3px 6px"> seconds
-      inside a zone.</div>
     <div data-ze-err style="color:#f87171;font-size:13px;min-height:18px;
                             margin-top:8px"></div>
     <div style="display:flex;gap:10px;margin-top:6px;flex-wrap:wrap">
@@ -2044,6 +2204,53 @@ let _zeCam = null, _zeKind = "loiter";
 let _zeZones = [];
 let _zeOthers = [];
 let _zeCurrent = [];
+
+function _zeRenderList() {
+  const list = zoneEditor.querySelector("[data-ze-list]");
+  const count = zoneEditor.querySelector("[data-ze-count]");
+  if (!list || !count) return;
+  count.textContent = String(_zeZones.length);
+  list.innerHTML = "";
+  if (!_zeZones.length) {
+    const empty = document.createElement("div");
+    empty.style.cssText = "color:#475569;font-size:12px;padding:6px 4px";
+    empty.textContent = "no zones yet - draw one on the snapshot.";
+    list.appendChild(empty);
+    return;
+  }
+  for (let i = 0; i < _zeZones.length; i++) {
+    const z = _zeZones[i];
+    const row = document.createElement("div");
+    row.style.cssText =
+      "display:flex;gap:6px;align-items:center;background:#1e293b;" +
+      "border-radius:6px;padding:6px 8px";
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.value = z.name || "";
+    nameInput.maxLength = 24;
+    nameInput.style.cssText =
+      "flex:1 1 auto;min-width:0;background:#0b1220;color:#e2e8f0;" +
+      "border:1px solid #334155;border-radius:4px;padding:3px 6px;" +
+      "font-size:12px";
+    nameInput.addEventListener("input", () => {
+      _zeZones[i].name = nameInput.value.trim().slice(0, 24);
+      _zeRedraw();   // redraw uses z.name for the on-canvas label
+    });
+    const delBtn = document.createElement("button");
+    delBtn.textContent = "delete";
+    delBtn.style.cssText =
+      "cursor:pointer;background:#7f1d1d;color:#fff;border:0;" +
+      "border-radius:4px;padding:4px 8px;font-size:11px;flex:0 0 auto";
+    delBtn.addEventListener("click", () => {
+      _zeZones.splice(i, 1);
+      _zeRedraw();      // canvas needs the removal reflected too
+      _zeRenderList();
+    });
+    row.appendChild(nameInput);
+    row.appendChild(delBtn);
+    list.appendChild(row);
+  }
+}
 
 function _zeRedraw() {
   const r = _zeImg.getBoundingClientRect();
@@ -2099,6 +2306,7 @@ function _zeClosePoly() {
   _zeCurrent = [];
   _zeErr.textContent = "";
   _zeRedraw();
+  _zeRenderList();
 }
 
 _zeCanvas.addEventListener("click", (e) => {
@@ -2119,10 +2327,12 @@ zoneEditor.querySelector("[data-ze-undo]").addEventListener("click", () => {
   if (_zeCurrent.length) _zeCurrent.pop();
   else _zeZones.pop();
   _zeRedraw();
+  _zeRenderList();
 });
 zoneEditor.querySelector("[data-ze-clear]").addEventListener("click", () => {
   _zeZones = []; _zeCurrent = [];
   _zeRedraw();
+  _zeRenderList();
 });
 zoneEditor.querySelector("[data-ze-cancel]").addEventListener("click",
   () => { zoneEditor.style.display = "none"; });
@@ -2165,10 +2375,11 @@ async function openZoneEditor(cam, kind, snapshotUrl) {
     const dz = _zeZones.find((z) => z.dwell_s);
     if (dz) zoneEditor.querySelector("[data-ze-dwell]").value = dz.dwell_s;
   } catch (_) { _zeZones = []; _zeOthers = []; }
-  _zeImg.onload = _zeRedraw;
+  _zeImg.onload = () => { _zeRedraw(); _zeRenderList(); };
   _zeImg.src = snapshotUrl;
   zoneEditor.style.display = "flex";
-  if (_zeImg.complete) _zeRedraw();
+  if (_zeImg.complete) { _zeRedraw(); _zeRenderList(); }
+  _zeRenderList();
 }
 
 // ---------- Crossings toast + strip ---------------------------------------

@@ -355,6 +355,15 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/screen-capture/bbox":
             self._screen_capture_bbox_get()
             return
+        if path == "/api/events.jsonl":
+            self._events_jsonl()
+            return
+        if path == "/api/export.csv":
+            self._export_csv()
+            return
+        if path == "/api/system":
+            self._system_info()
+            return
         super().do_GET()
 
     def do_POST(self) -> None:
@@ -564,6 +573,89 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body))); self.end_headers()
         self.wfile.write(body)
+
+    def _system_info(self) -> None:
+        """GET /api/system - inference backend + detector weight the
+        server is running with. Answers the operator's "am I on the
+        fast path?" question without opening the terminal."""
+        try:
+            from app.detect_core import system_info
+            self._send_json(200, {"ok": True, **system_info()})
+        except Exception as e:
+            self._send_json(500, {"ok": False,
+                                  "error": f"{type(e).__name__}: {e}"})
+
+    def _events_jsonl(self) -> None:
+        """GET /api/events.jsonl?cam=<id>[&limit=<N>] - append-only event
+        log served as newline-delimited JSON, newest last (chronological
+        order matches the CSV export). Missing sink = 200 empty body."""
+        cam = self._q_cam()
+        if cam is None:
+            return
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        try:
+            limit = max(1, min(5000, int((q.get("limit") or ["500"])[0])))
+        except ValueError:
+            limit = 500
+        from app.live_analysis import read_events
+        events = read_events(cam, limit=limit)
+        body = "".join(json.dumps(e, ensure_ascii=False) + "\n"
+                       for e in events).encode("utf-8")
+        self._send_bytes(200, "application/x-ndjson", body)
+
+    def _export_csv(self) -> None:
+        """GET /api/export.csv?cam=<id>[&limit=<N>] - the same event log
+        as /api/events.jsonl serialized as CSV so an operator can drop
+        it into Excel / Google Sheets without a JSON round-trip. Column
+        order: iso, ts, cam, layer, text, cls, tid, x1, y1, x2, y2. An
+        alert with no bbox (e.g. a face count summary) gets empty
+        coordinate columns."""
+        cam = self._q_cam()
+        if cam is None:
+            return
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        try:
+            limit = max(1, min(50_000, int((q.get("limit") or ["2000"])[0])))
+        except ValueError:
+            limit = 2000
+        from app.live_analysis import read_events
+        events = read_events(cam, limit=limit)
+        import csv
+        import io
+        buf = io.StringIO()
+        w = csv.writer(buf, lineterminator="\n")
+        w.writerow(["iso", "ts", "cam", "layer", "text",
+                    "cls", "tid", "x1", "y1", "x2", "y2"])
+        for e in events:
+            box = e.get("box") or {}
+            w.writerow([
+                e.get("iso", ""),
+                e.get("ts", ""),
+                e.get("cam", ""),
+                e.get("layer", ""),
+                (e.get("text") or "").replace("\n", " "),
+                box.get("cls", "") or "",
+                box.get("tid", "") if box.get("tid") is not None else "",
+                box.get("x1", "") if box else "",
+                box.get("y1", "") if box else "",
+                box.get("x2", "") if box else "",
+                box.get("y2", "") if box else "",
+            ])
+        payload = buf.getvalue().encode("utf-8")
+        # Content-Disposition primes the browser to save-as when the
+        # operator opens the URL directly. Overridden if the caller
+        # asks with fetch() from JS.
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header(
+            "Content-Disposition",
+            f'attachment; filename="events_{cam}.csv"')
+        self.send_header("Access-Control-Allow-Origin", "*")
+        super().end_headers()
+        self.wfile.write(payload)
 
     # ---- Screen-capture bbox (screen://primary YouTube fallback) ---------
     # GET  /api/screen-capture/bbox           -> current bbox (or null)

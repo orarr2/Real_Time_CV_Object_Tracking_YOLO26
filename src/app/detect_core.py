@@ -124,6 +124,116 @@ NAME_BY_ID = {v: k for k, v in CLASSES_OF_INTEREST.items()}
 # look at rail.
 VEHICLE_NAMES = ("bicycle", "car", "motorcycle", "bus", "truck")
 
+# Animal consolidation (2026-08-17, operator request). COCO ships six
+# distinct animal ids (14 bird, 15 cat, 16 dog, 17 horse, 18 sheep,
+# 19 cow); on a street cam the distinction is noise - one "animal"
+# count reads more cleanly on the line and event log than six seldom-
+# occupied per-species buckets. NAME_BY_ID maps every animal id to
+# the single label "animal" so any downstream code that reads
+# box["cls"] sees the same string regardless of species. EXTRA_CLASSES
+# still wins for anyone who wants species labels back: assigning
+# NAME_BY_ID[14] = "bird" through _apply_extra_classes overrides the
+# animal mapping for that specific id.
+_ANIMAL_LABEL = "animal"
+_ANIMAL_COCO_IDS = frozenset({14, 15, 16, 17, 18, 19})
+for _aid in _ANIMAL_COCO_IDS:
+    NAME_BY_ID[_aid] = _ANIMAL_LABEL
+
+
+# ---- Inference-backend selector (2026-08-17) ---------------------------
+# Reports which runtime is actually available on this machine so the
+# operator gets a real answer from the dashboard capability chip
+# instead of a rumor. Prefers OpenVINO on Intel (2-3x faster inference
+# on the CPUs this project runs on) and falls back to plain CPU torch
+# when OpenVINO is not installed / has no devices exposed. The pick is
+# CACHED to ~/.yolo26_pref.json so a re-invocation returns the same
+# answer without re-probing (probe cost is negligible - the cache is
+# more about giving the operator a stable label between restarts).
+_BACKEND_PREF_PATH = None
+
+
+def _backend_pref_path():
+    global _BACKEND_PREF_PATH
+    if _BACKEND_PREF_PATH is None:
+        try:
+            from pathlib import Path as _P
+            _BACKEND_PREF_PATH = _P.home() / ".yolo26_pref.json"
+        except Exception:
+            _BACKEND_PREF_PATH = None
+    return _BACKEND_PREF_PATH
+
+
+def _probe_openvino_devices() -> list[str]:
+    """Return the list of OpenVINO CPU/GPU devices the runtime can see.
+    Empty list on any failure (openvino not installed, no compatible
+    device). Cheap - milliseconds - but only called once per session."""
+    try:
+        import openvino as ov
+        return list(ov.Core().available_devices)
+    except Exception:
+        return []
+
+
+def select_backend() -> dict:
+    """Choose the inference backend for this process. Returns a dict:
+        {"backend": "openvino"|"cpu",
+         "device":  "CPU"|"GPU.0"|"cpu-torch",
+         "openvino_devices": [...],
+         "cached":  bool}
+    Cached pref is only trusted when its cached openvino_devices still
+    match today's probe (an operator installing / uninstalling OpenVINO
+    between runs would otherwise get a stale label)."""
+    devices = _probe_openvino_devices()
+    p = _backend_pref_path()
+    cached: dict | None = None
+    if p is not None:
+        try:
+            import json as _json
+            cached = _json.loads(p.read_text())
+        except (OSError, ValueError):
+            cached = None
+    if (cached
+            and cached.get("openvino_devices") == devices
+            and cached.get("backend") in ("openvino", "cpu")):
+        cached["cached"] = True
+        return cached
+    if devices:
+        # Prefer GPU when the runtime lists one (Intel iGPU / discrete);
+        # otherwise CPU. Both are still under the openvino backend so
+        # load_model()'s _openvino_model detection continues to work.
+        pref = next((d for d in devices if d.startswith("GPU")), "CPU")
+        chosen = {"backend": "openvino", "device": pref,
+                  "openvino_devices": devices, "cached": False}
+    else:
+        chosen = {"backend": "cpu", "device": "cpu-torch",
+                  "openvino_devices": [], "cached": False}
+    if p is not None:
+        try:
+            import json as _json
+            p.write_text(_json.dumps(chosen))
+        except OSError:
+            pass
+    return chosen
+
+
+def system_info() -> dict:
+    """Compact dashboard payload. Pairs the backend chip with the
+    canonical detector name (yolo26m) so the operator sees BOTH the
+    runtime and the weights it feeds - a fast backend paired with the
+    wrong weights is worth surfacing."""
+    b = select_backend()
+    label = "YOLO26 (CPU)"
+    if b["backend"] == "openvino":
+        label = f"YOLO26 OpenVINO ({b['device']})"
+    return {
+        "model": label,
+        "backend": b["backend"],
+        "device": b["device"],
+        "openvino_devices": b["openvino_devices"],
+        "detector_weight": "yolo26m",
+        "cached": b["cached"],
+    }
+
 # Model input size the collector runs at. YOLO's 640 default shrinks a distant
 # pedestrian on these wide street shots to a handful of pixels and the model
 # undercounts badly (3 visible cars -> 1 detected). 960 costs ~2.3x the CPU
@@ -1286,15 +1396,13 @@ DEFAULT_PER_CLASS_CONF = {
     "train":      0.25,
     "truck":      0.35,
     # 2026-08-17: animals opted into LIVE_CLASSES (line layer needs to
-    # count them). Gates at 0.30 - permissive enough that a street
-    # dog / cat / horse actually clears, tight enough that texture
-    # noise doesn't hallucinate a cow on an empty road.
-    "bird":       0.30,
-    "cat":        0.30,
-    "dog":        0.30,
-    "horse":      0.30,
-    "sheep":      0.30,
-    "cow":        0.30,
+    # count them). Every COCO animal id (14-19) shows up under the
+    # single "animal" label by way of NAME_BY_ID - see the animal
+    # consolidation block above. One gate at 0.30 covers all of
+    # them; permissive enough that a street dog / cat / horse
+    # actually clears, tight enough that texture noise doesn't
+    # hallucinate one on an empty road.
+    "animal":     0.30,
 }
 
 # ---- Opt-in extra classes (EXTRA_CLASSES env) --------------------------------
@@ -1633,7 +1741,7 @@ _BOX_COLORS = {
     "bus":        (0, 90, 230),
     "train":      (200, 60, 200),   # magenta - rail is neither road nor foot
     "truck":      (0, 90, 230),
-    "bird":       (60, 200, 220),   # only drawn when EXTRA_CLASSES adds it
+    "animal":     (60, 200, 220),   # amber - one color for every species
 }
 
 
