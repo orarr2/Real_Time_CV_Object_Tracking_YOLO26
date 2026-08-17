@@ -69,9 +69,11 @@ python serve.py                     # opens http://localhost:8000
 ```
 
 Model weights are not shipped with the repo (see
-[Model files](#model-files)). `yolo26m.pt` and `yolov8n-pose.pt`
-auto-download on first use via `ultralytics`; the LPR + face + Re-ID
-weights need one manual fetch per fresh checkout.
+[Model files](#model-files)). The notebook downloads everything itself
+on the first run — `yolo26m.pt` and `yolov8n-pose.pt` come via
+`ultralytics`; the LPR + face weights are fetched by a dedicated cell
+(section 0b) directly on the machine running the notebook. No manual
+downloads, no separate script.
 
 Alternatively:
 
@@ -159,12 +161,20 @@ stream (accumulators are preserved).
 | `src/data/face_detection_yunet_2023mar.onnx` | YuNet face detector (bounding boxes only).                               | [opencv/opencv_zoo `face_detection_yunet_2023mar.onnx`](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet). |
 | `src/data/osnet_x0_25_msmt17.onnx`           | OSNet re-identification embedding (falls back to HSV histogram if absent). | [KaiyangZhou/deep-person-reid](https://github.com/KaiyangZhou/deep-person-reid) — export `osnet_x0_25` to ONNX. |
 
-Weights are **not** committed to the repository (see `.gitignore`) —
-they are large binary artifacts that live outside version control. Drop
-each file at the path listed above. The Ultralytics rows download
-themselves on first use; the rest need one manual fetch per fresh
-checkout. Non-Latin OCR (Thai, Arabic, Japanese) is enabled by
-installing `easyocr` and setting `PLATE_OCR_LANGS=latin,th,ar,ja`.
+Weights are **not** committed to the repository (see `.gitignore`).
+The notebook (`real_time_cv.ipynb`, section 0b) fetches every weight
+above on its first run — nothing manual, nothing shipped, everything
+lands on the machine running the notebook. The table's "Where to get
+it" column is the fallback for standalone dashboard runs
+(`python serve.py` without ever opening the notebook) or for any URL
+the notebook cell couldn't reach. Non-Latin OCR (Thai, Arabic,
+Japanese) is enabled by installing `easyocr` and setting
+`PLATE_OCR_LANGS=latin,th,ar,ja`.
+
+OSNet Re-ID ONNX is the only weight the notebook does not auto-fetch
+(no permissive public URL exists as a single file). The Re-ID layer
+falls back to an HSV colour histogram in its absence — the default
+already-working behaviour.
 
 ## Notebook
 
