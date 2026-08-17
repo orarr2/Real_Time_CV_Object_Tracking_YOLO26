@@ -195,15 +195,29 @@ BODY_ANOMALY_LABELS = frozenset({"fall_suspect", "erratic", "running",
 # velocity. The pose model returns COCO-17 kps; wrists (9,10) and ankles
 # (15,16) are the limbs a theft/escape/punch swings hard. Per-track ring
 # of the last N tick displacements, and flag when the newest hop exceeds
-# BODY_SUDDEN_RATIO x the median of that ring. Ratio 2.0, minimum ring 5,
+# BODY_SUDDEN_RATIO x the median of that ring. Ratio 1.8, minimum ring 3
+# (2026-08-17: lowered from 2.0 / 5 so martial-arts kicks and dance moves
+# trip the flag within 3 ticks instead of 5 - operator report said the
+# detector felt "silent" on obvious fast motion),
 # and a hop floor in normalized (box-diagonal) units so a tiny hand jitter
 # on a small crop can't fire.
 BODY_SUDDEN_KP_IDX = (9, 10, 15, 16)
-BODY_SUDDEN_RATIO = 2.0
+BODY_SUDDEN_RATIO = 1.8           # was 2.0; 1.8 catches quick punches / jabs
 BODY_SUDDEN_RING = 10
-BODY_SUDDEN_FLOOR = 0.30          # hop >= 30% of box diagonal
+BODY_SUDDEN_FLOOR = 0.20          # was 0.30; a hop of 20% of box-diagonal
+                                  # is a clear fast motion (kick / dance /
+                                  # arm swing) - was silent below 30%
+BODY_SUDDEN_MIN_SAMPLES = 3       # was 5; catches sudden motion within
+                                  # 3 ticks of a fresh track instead of 5
 BODY_SUDDEN_MIN_CONF = 0.35       # ignore low-conf kps entirely
 BODY_SUDDEN_COOLDOWN_S = 3.0      # do not re-flag the same tid for N s
+# 2026-08-17: bbox-centroid velocity fallback when pose keypoints are
+# absent (small / distant person that failed the pose crop gate).
+# A track whose centroid darts >= BODY_BBOX_SUDDEN_FRAC of its own
+# diagonal in one tick counts as sudden motion too - catches a running
+# person that pose isn't even trying to score.
+BODY_BBOX_SUDDEN_FRAC = 0.35
+BODY_BBOX_SUDDEN_MIN_SAMPLES = 3
 
 
 class BusyError(RuntimeError):
@@ -971,11 +985,14 @@ def draw_body_layer(img, boxes: list[dict], stats_by_id: dict,
         _chip(img, b, " ".join(parts), color)
     alerts = [s for _, s, _ in flagged if s.get("alert")]
     sudden_count = sum(1 for _, _, sud in flagged if sud)
+    with_kps = sum(1 for b in persons if b.get("kps"))
     _hud_panel(img, ["BODY ANOMALIES",
-                     f"persons in view: {len(persons)}",
+                     f"persons in view: {len(persons)} ({with_kps} w/ pose)",
                      f"flagged: {len(flagged)}"
                      + (f" ({sudden_count} sudden)" if sudden_count
-                        else "" if flagged else " (none right now)")],
+                        else "" if flagged else " (none right now)"),
+                     ("watching: fast punches/kicks (pose), "
+                      "sudden displacement (bbox fallback)")],
                alert=bool(alerts or sudden_count))
     if alerts or sudden_count:
         kinds: dict[str, int] = {}
@@ -2289,6 +2306,45 @@ class LiveSession(threading.Thread):
         self._zone_cache = result
         return result
 
+    def _bbox_sudden_check(self, tid: int, box: tuple, now: float) -> bool:
+        """Fallback sudden-motion detector when pose keypoints are absent.
+
+        Watches the bbox centroid. A track whose centroid darts by
+        BODY_BBOX_SUDDEN_FRAC (35% default) of its own diagonal from
+        one tick to the next - AFTER at least a few baseline samples -
+        counts as sudden motion. Catches people RUNNING / FLEEING that
+        pose can't see at their box size.
+        """
+        if not hasattr(self, "_body_bbox_hist"):
+            self._body_bbox_hist: dict[int, list[float]] = {}
+            self._body_bbox_prev: dict[int, tuple] = {}
+        prev = self._body_bbox_prev.get(tid)
+        self._body_bbox_prev[tid] = box
+        x1, y1, x2, y2 = box
+        diag = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+        if diag < 8 or prev is None:
+            return False
+        cx0 = (prev[0] + prev[2]) / 2
+        cy0 = (prev[1] + prev[3]) / 2
+        cx1 = (x1 + x2) / 2
+        cy1 = (y1 + y2) / 2
+        hop_frac = (((cx1 - cx0) ** 2 + (cy1 - cy0) ** 2) ** 0.5) / diag
+        ring = self._body_bbox_hist.setdefault(tid, [])
+        ring.append(hop_frac)
+        if len(ring) > BODY_SUDDEN_RING:
+            del ring[:-BODY_SUDDEN_RING]
+        if len(ring) < BODY_BBOX_SUDDEN_MIN_SAMPLES:
+            return False
+        if not hasattr(self, "_body_kp_flag_ts"):
+            self._body_kp_flag_ts = {}
+        last_flag = self._body_kp_flag_ts.get(tid, 0.0)
+        if now - last_flag < BODY_SUDDEN_COOLDOWN_S:
+            return False
+        if hop_frac >= BODY_BBOX_SUDDEN_FRAC:
+            self._body_kp_flag_ts[tid] = now
+            return True
+        return False
+
     def _sudden_motion_check(self, tid: int, kps: list,
                               box: tuple, now: float) -> bool:
         """True on the tick a track's wrist/ankle keypoint velocity spikes
@@ -2333,7 +2389,7 @@ class LiveSession(threading.Thread):
         if len(ring) > BODY_SUDDEN_RING:
             del ring[:-BODY_SUDDEN_RING]
         # Need at least a few observations for a meaningful baseline.
-        if len(ring) < 5:
+        if len(ring) < BODY_SUDDEN_MIN_SAMPLES:
             return False
         # Median of the ring EXCLUDING this newest hop is the baseline.
         baseline_sorted = sorted(ring[:-1])
@@ -2479,22 +2535,34 @@ class LiveSession(threading.Thread):
                 if (layer == "body" and tr.cls == "person"
                         and tr.tid not in riders_pub):
                     try:
-                        # Sudden-motion gate (2026-08-16, replaces the
-                        # removed behavior_labels path). Per-track ring of
-                        # the last N wrist/ankle hops; if the newest hop
-                        # is >= BODY_SUDDEN_RATIO x the median AND above
-                        # BODY_SUDDEN_FLOOR in box-diagonal units, mint a
-                        # "sudden_motion" flag. Anti-spam cooldown per
-                        # tid so one punch doesn't fire on every tick.
+                        # Sudden-motion gate. Two paths:
+                        # (1) with pose keypoints -> per-track ring of
+                        #     wrist/ankle hop distances (BODY_SUDDEN_*).
+                        #     Fires on martial-arts kicks / punches /
+                        #     dance moves / fall bursts.
+                        # (2) without keypoints (small / distant person
+                        #     that missed pose's crop gate) -> bbox
+                        #     centroid velocity fallback. Fires on a
+                        #     person suddenly RUNNING or fleeing across
+                        #     the frame.
+                        # Either path can flag; both share the same
+                        # per-tid cooldown so one event never spams.
+                        _bbx = (jb["x1"], jb["y1"], jb["x2"], jb["y2"])
+                        _now = time.time()
+                        flagged = False
                         if jb.get("kps"):
                             flagged = self._sudden_motion_check(
-                                tr.tid, jb["kps"],
-                                (jb["x1"], jb["y1"], jb["x2"], jb["y2"]),
-                                time.time())
+                                tr.tid, jb["kps"], _bbx, _now)
+                            reason = "wrist/ankle burst"
+                        if not flagged:
+                            flagged = self._bbox_sudden_check(
+                                tr.tid, _bbx, _now)
                             if flagged:
-                                jb["flag"] = "sudden_motion"
-                                jb["alert"] = True
-                                jb["flags"] = ["wrist/ankle burst"]
+                                reason = "sudden displacement"
+                        if flagged:
+                            jb["flag"] = "sudden_motion"
+                            jb["alert"] = True
+                            jb["flags"] = [reason]
                     except Exception:
                         pass
             js_boxes.append(jb)

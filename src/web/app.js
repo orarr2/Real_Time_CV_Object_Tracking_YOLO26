@@ -1772,51 +1772,65 @@ async function pollLocalModelView() {
 // ---------- Line editor (counting-line drawing) ---------------------------
 
 const lineEditor = document.createElement("div");
-// 2026-08-17: modal is now viewport-scroll-safe (max-height + overflow-y
-// on the inner container so the Save row is ALWAYS reachable even on
-// portrait snapshots or short laptop screens), the image is height-capped
-// so the whole modal fits on a 900px screen without hiding the buttons,
-// and the backdrop is lighter so the video underneath stays visible
-// instead of showing a "black screen".
+// 2026-08-17 (round 2): strict flex-column layout - fixed header top,
+// scrollable body middle, PINNED footer bottom - so the Save/Cancel
+// row is unconditionally reachable regardless of snapshot size or
+// load state. Explicit loading + error placeholders inside the image
+// container so the modal is never "just black" while the snapshot
+// fetches (previously an in-flight or 404-ing snapshot left the img
+// container 0-height, which made the whole modal collapse to only
+// the header + darkness).
 lineEditor.style.cssText =
   "display:none;position:fixed;inset:0;z-index:70;background:rgba(2,6,23,.55);" +
   "align-items:center;justify-content:center;padding:16px;box-sizing:border-box";
 lineEditor.innerHTML = `
   <div style="background:#0f172a;border:1px solid #334155;border-radius:12px;
-              padding:16px 18px;max-width:800px;width:94%;
-              max-height:92vh;overflow-y:auto;color:#e2e8f0;
-              display:flex;flex-direction:column;gap:10px">
-    <h3 style="margin:0;font-size:17px">Counting line -
-      <span data-le-cam></span></h3>
-    <div style="color:#94a3b8;font-size:13px">
-      Drag on the snapshot to place a counting line. Save persists it
-      per-camera and closes this dialog; a running Line-layer session
-      picks it up within a few seconds without a restart.</div>
-    <div style="position:relative;background:#020617;border:1px solid #334155;
-                border-radius:8px;overflow:hidden;max-height:55vh;
-                display:flex;justify-content:center;align-items:center">
-      <img data-le-img style="display:block;max-width:100%;max-height:55vh;
-                              width:auto;height:auto;object-fit:contain;
-                              user-select:none;-webkit-user-drag:none">
-      <canvas data-le-canvas style="position:absolute;inset:0;width:100%;
-                                     height:100%;cursor:crosshair"></canvas>
+              max-width:800px;width:94%;max-height:92vh;color:#e2e8f0;
+              display:flex;flex-direction:column;overflow:hidden">
+    <div style="padding:14px 18px 6px;flex:0 0 auto">
+      <h3 style="margin:0;font-size:17px">Counting line -
+        <span data-le-cam></span></h3>
+      <div style="color:#94a3b8;font-size:13px;margin-top:4px">
+        Drag on the snapshot to place a counting line. Save persists
+        it per-camera and closes this dialog; a running Line-layer
+        session picks it up within a few seconds without a restart.
+      </div>
     </div>
-    <div data-le-classes style="display:flex;flex-wrap:wrap;gap:10px 16px;
-                                 font-size:13px;color:#cbd5e1"></div>
-    <div style="color:#94a3b8;font-size:12px">
-      Nothing checked = count every tracked class.</div>
-    <div data-le-err style="color:#f87171;font-size:13px;min-height:18px"></div>
-    <div style="display:flex;gap:10px;flex-wrap:wrap;
-                position:sticky;bottom:0;background:#0f172a;padding-top:6px">
+    <div style="padding:6px 18px;flex:1 1 auto;overflow-y:auto;
+                display:flex;flex-direction:column;gap:8px">
+      <div style="position:relative;background:#020617;
+                  border:1px solid #334155;border-radius:8px;
+                  overflow:hidden;min-height:200px;
+                  display:flex;justify-content:center;align-items:center">
+        <div data-le-placeholder style="color:#94a3b8;font-size:14px;
+             text-align:center;padding:16px">Loading snapshot...</div>
+        <img data-le-img style="display:none;max-width:100%;max-height:55vh;
+                                width:auto;height:auto;object-fit:contain;
+                                user-select:none;-webkit-user-drag:none">
+        <canvas data-le-canvas style="display:none;position:absolute;inset:0;
+                                       width:100%;height:100%;
+                                       cursor:crosshair"></canvas>
+      </div>
+      <div data-le-classes style="display:flex;flex-wrap:wrap;
+                                   gap:10px 16px;font-size:13px;
+                                   color:#cbd5e1"></div>
+      <div style="color:#94a3b8;font-size:12px">
+        Nothing checked = count every tracked class.</div>
+      <div data-le-err style="color:#f87171;font-size:13px;
+                              min-height:18px"></div>
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;flex:0 0 auto;
+                padding:10px 18px 14px;background:#0f172a;
+                border-top:1px solid #1e293b">
       <button data-le-save style="cursor:pointer;background:#2563eb;border:0;
-              color:#fff;border-radius:8px;padding:8px 20px;font-weight:600">
+              color:#fff;border-radius:8px;padding:9px 22px;font-weight:600">
         Save &amp; Close</button>
       <button data-le-clear style="cursor:pointer;background:#334155;border:0;
-              color:#fff;border-radius:8px;padding:8px 14px">
+              color:#fff;border-radius:8px;padding:9px 14px">
         Clear override</button>
       <button data-le-cancel style="cursor:pointer;background:#1e293b;
               border:1px solid #334155;color:#e2e8f0;border-radius:8px;
-              padding:8px 14px;margin-left:auto">Cancel</button>
+              padding:9px 14px;margin-left:auto">Cancel</button>
     </div>
   </div>`;
 document.body.appendChild(lineEditor);
@@ -1941,9 +1955,23 @@ async function openLineEditor(cam, snapshotUrl) {
   _leCam = cam;
   _lePts = [];
   lineEditor.querySelector("[data-le-cam]").textContent = cam;
-  _leImg.src = snapshotUrl || `/api/analysis/frame?cam=${encodeURIComponent(cam)}&_=${Date.now()}`;
+  const placeholder = lineEditor.querySelector("[data-le-placeholder]");
+  placeholder.style.display = "";
+  placeholder.style.color = "#94a3b8";
+  placeholder.textContent = "Loading snapshot from the running analysis...";
+  _leImg.style.display = "none";
+  _leCanvas.style.display = "none";
   _leRenderClasses(_leLastAllowed, []);
+  // Show the modal IMMEDIATELY so the operator sees the header +
+  // buttons + a "loading..." caption instead of a black screen while
+  // the JPEG fetch is in flight (or 404s on a not-yet-started session).
+  lineEditor.style.display = "flex";
+  // Attach handlers BEFORE setting src so a cached image can't miss
+  // its onload race.
   _leImg.onload = () => {
+    placeholder.style.display = "none";
+    _leImg.style.display = "block";
+    _leCanvas.style.display = "block";
     fetch(`/api/lines?cam=${encodeURIComponent(cam)}`).then(r => r.json()).then(d => {
       if (d && d.line) _lePts = d.line;
       if (d && Array.isArray(d.allowed_classes) && d.allowed_classes.length)
@@ -1952,7 +1980,15 @@ async function openLineEditor(cam, snapshotUrl) {
       _leDraw();
     }).catch(() => _leDraw());
   };
-  lineEditor.style.display = "flex";
+  _leImg.onerror = () => {
+    _leImg.style.display = "none";
+    _leCanvas.style.display = "none";
+    placeholder.style.color = "#f87171";
+    placeholder.textContent =
+      "No snapshot available yet. Start the Line layer on this camera " +
+      "for a few seconds, then click Draw line again.";
+  };
+  _leImg.src = snapshotUrl || `/api/analysis/frame?cam=${encodeURIComponent(cam)}&_=${Date.now()}`;
 }
 window.openLineEditor = openLineEditor;
 
