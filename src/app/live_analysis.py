@@ -197,37 +197,57 @@ CROSSING_COOLDOWN_S = 2.0
 INFER_LOCK = threading.Lock()
 
 # Body-anomaly layer: which behavior labels count as an anomaly worth
-# drawing (everything else - walking/standing/dwelling/driving/parked -
-# is normal street life).
-BODY_ANOMALY_LABELS = frozenset({"fall_suspect", "erratic", "running",
-                                 "sudden_motion"})
-# Body layer 2026-08-16: sudden-motion gate on wrist/ankle keypoint
-# velocity. The pose model returns COCO-17 kps; wrists (9,10) and ankles
-# (15,16) are the limbs a theft/escape/punch swings hard. Per-track ring
-# of the last N tick displacements, and flag when the newest hop exceeds
-# BODY_SUDDEN_RATIO x the median of that ring. Ratio 1.8, minimum ring 3
-# (2026-08-17: lowered from 2.0 / 5 so martial-arts kicks and dance moves
-# trip the flag within 3 ticks instead of 5 - operator report said the
-# detector felt "silent" on obvious fast motion),
-# and a hop floor in normalized (box-diagonal) units so a tiny hand jitter
-# on a small crop can't fire.
+# drawing. "running" was removed 2026-08-18: normal fast walking often
+# labeled as running, causing constant red flags for legitimate street
+# behaviour. Real escapes trip the bbox-centroid velocity fallback below
+# which is set high enough to only catch actual bolt-away motion.
+BODY_ANOMALY_LABELS = frozenset({"fall_suspect", "erratic",
+                                 "sudden_motion", "fighting"})
+# Body layer sudden-motion gate on wrist/ankle keypoint velocity. The
+# pose model returns COCO-17 kps; wrists (9,10) and ankles (15,16) are
+# the limbs a theft/escape/punch swings hard. Per-track ring of the last
+# N tick displacements, flag when the newest hop exceeds
+# BODY_SUDDEN_RATIO x the median of that ring.
+#
+# 2026-08-18 tightened significantly after operator report that the layer
+# was flagging normal walking / talking / standing as anomalies:
+#   ratio 1.8 -> 2.4  (needs a much clearer spike above baseline)
+#   ring  10  -> 10   (unchanged, enough history)
+#   floor 0.20 -> 0.45 (hop must be 45% of box diagonal, not 20%)
+#   min-samples 3 -> 6 (need 6 ticks of history before a first flag)
+#   cooldown 3.0s -> 8.0s (don't re-flag the same person every few ticks)
 BODY_SUDDEN_KP_IDX = (9, 10, 15, 16)
-BODY_SUDDEN_RATIO = 1.8           # was 2.0; 1.8 catches quick punches / jabs
+# Operator explicitly asked to tighten these on 2026-08-20 - "still too
+# sensitive on my footage even after the earlier raises". Ratio 2.4 -> 3.0
+# means the 4-limb mean displacement now needs to be 3x the trailing
+# median before a sudden-motion fires; floor 0.45 -> 0.55 raises the
+# absolute minimum so a moderate-tempo hand wave never trips it.
+BODY_SUDDEN_RATIO = 3.0
 BODY_SUDDEN_RING = 10
-BODY_SUDDEN_FLOOR = 0.20          # was 0.30; a hop of 20% of box-diagonal
-                                  # is a clear fast motion (kick / dance /
-                                  # arm swing) - was silent below 30%
-BODY_SUDDEN_MIN_SAMPLES = 3       # was 5; catches sudden motion within
-                                  # 3 ticks of a fresh track instead of 5
+BODY_SUDDEN_FLOOR = 0.55
+BODY_SUDDEN_MIN_SAMPLES = 6
 BODY_SUDDEN_MIN_CONF = 0.35       # ignore low-conf kps entirely
-BODY_SUDDEN_COOLDOWN_S = 3.0      # do not re-flag the same tid for N s
-# 2026-08-17: bbox-centroid velocity fallback when pose keypoints are
-# absent (small / distant person that failed the pose crop gate).
-# A track whose centroid darts >= BODY_BBOX_SUDDEN_FRAC of its own
-# diagonal in one tick counts as sudden motion too - catches a running
-# person that pose isn't even trying to score.
-BODY_BBOX_SUDDEN_FRAC = 0.35
-BODY_BBOX_SUDDEN_MIN_SAMPLES = 3
+BODY_SUDDEN_COOLDOWN_S = 8.0
+# bbox-centroid velocity fallback when pose keypoints are absent
+# (small / distant person that failed the pose crop gate). A track whose
+# centroid darts >= BODY_BBOX_SUDDEN_FRAC of its own diagonal in one
+# tick counts as sudden motion too. Raised 0.35 -> 0.55 so brisk walking
+# doesn't fire; only actual running / bolting motion trips this.
+BODY_BBOX_SUDDEN_FRAC = 0.65
+BODY_BBOX_SUDDEN_MIN_SAMPLES = 6
+# Fighting detector: two person tracks within N px of each other AND
+# both trip the sudden-motion gate on the same tick. Catches punches /
+# shoves that a single-person kinematic pass can't distinguish from a
+# fast dance move.
+BODY_FIGHT_MAX_DIST_PX = 90
+BODY_FIGHT_COOLDOWN_S = 8.0
+
+# Plate auto-save: how many unique-OCR-text plate reads a live session
+# is willing to write to the Investigation gallery before it stops. The
+# cap keeps saved.json scannable in the UI; a fresh session starts a
+# new pool. Deduped by uppercase OCR text so a single passing car isn't
+# saved once per tick.
+PLATE_AUTO_SAVE_CAP = 200
 
 
 # ---- Append-only event sink (2026-08-17) -------------------------------
@@ -954,12 +974,35 @@ def draw_pose_layer(img, boxes: list[dict]):
 
 
 def draw_plates_layer(img, boxes: list[dict]):
-    """Vehicle boxes + plate strings ONLY. Vehicles without an accepted
-    read stay unannotated; the caption tells how many were in range."""
+    """Vehicle boxes + plate strings. GREEN = read succeeded (OCR text
+    shown); AMBER = in plate range (pipeline recognises the vehicle as
+    a candidate) but OCR has not landed a read yet. Amber gives the
+    operator visual feedback that the LPR stage-1 detection is working
+    even when stage-2 OCR fails on hard frames."""
     import cv2
     from app.plates import MIN_VEHICLE_W, PLATE_VEHICLE_CLASSES
     veh = [b for b in boxes if b.get("cls") in PLATE_VEHICLE_CLASSES]
     read = [b for b in veh if b.get("plate")]
+    # AMBER (thin) - in plate range, no read yet
+    for b in veh:
+        if b.get("plate"):
+            continue  # green drawing below wins
+        w_px = int(b.get("x2", 0)) - int(b.get("x1", 0))
+        if w_px < MIN_VEHICLE_W:
+            continue
+        p1 = (int(b["x1"]), int(b["y1"]))
+        p2 = (int(b["x2"]), int(b["y2"]))
+        cv2.rectangle(img, p1, p2, (0, 165, 255), 1)  # amber (BGR)
+        tag = f"{b.get('cls','?')} {b.get('conf', 0):.2f}  no-read"
+        (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX,
+                                      0.4, 1)
+        ty = max(th + 4, p1[1] - 2)
+        cv2.rectangle(img, (p1[0], ty - th - 4), (p1[0] + tw + 4, ty + 1),
+                      (24, 30, 44), -1)
+        cv2.putText(img, tag, (p1[0] + 2, ty - 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 200, 255), 1,
+                    cv2.LINE_AA)
+    # GREEN (thick) - read succeeded, OCR text shown
     for b in read:
         p1 = (int(b["x1"]), int(b["y1"]))
         p2 = (int(b["x2"]), int(b["y2"]))
@@ -1710,49 +1753,67 @@ class LiveSession(threading.Thread):
     # -- lifecycle ---------------------------------------------------------
 
     def run(self) -> None:
+        # Per-tick guard so one bad frame (e.g. a new class the downstream
+        # colour/config map hasn't been extended for - the KeyError:'animal'
+        # observed on 2026-08-20) does not kill the whole session. The
+        # outer try still catches process-fatal errors; the inner one logs
+        # once and continues on the next tick.
+        _tick_err_logged = False
         try:
             while (not self.stop_event.is_set()
                    and time.time() - self.last_poll < IDLE_STOP_S):
                 t0 = time.time()
-                frame = self._grab()
-                if frame is None:
-                    self._publish_note("stream unavailable - retrying...")
-                    if self.stop_event.wait(2.0):
-                        break
-                    continue
-                self._last_frame = frame   # event thumbs crop from here
-                boxes = self._infer(frame)
-                now = time.time()
-                if self.tracker is None:
-                    from app.tracker import BurstTracker
-                    self.tracker = BurstTracker(frame.shape)
-                self.tracker.update(boxes, now)
-                self._trim()
-                layer = self.layer
-                if layer in ("pose", "gestures", "body"):
-                    self._pose_pass(frame, boxes)
-                if layer == "plates":
-                    # 2026-08-17: operator wants LPR to run on live streams
-                    # regardless of kind. YouTube pixels are compressed and
-                    # OCR often fails on them, but the failure is honest
-                    # (empty plate string) and the ATTEMPT is what the
-                    # operator asked for. The old YouTube-blanket skip is
-                    # gone; a per-track cache + confidence gate inside
-                    # attach_plates still stops the pass from wasting cycles
-                    # on unreadable crops.
-                    self._plates_pass(frame)
-                if layer == "parking":
-                    self._parking_probe(frame)
-                    self._auto_parking_tick(frame.shape, now)
-                if layer == "fire":
-                    self._fire_pass(frame)
-                faces_list: list[dict] = []
-                if layer == "faces":
-                    faces_list = self._faces_pass(frame, boxes)
-                self._accumulate(frame, boxes, now)
-                img = self._render(frame, faces_list, layer)
-                self._publish(img)
-                self._publish_data(frame.shape, boxes, layer, faces_list)
+                try:
+                    frame = self._grab()
+                    if frame is None:
+                        self._publish_note("stream unavailable - retrying...")
+                        if self.stop_event.wait(2.0):
+                            break
+                        continue
+                    self._last_frame = frame   # event thumbs crop from here
+                    boxes = self._infer(frame)
+                    now = time.time()
+                    if self.tracker is None:
+                        from app.tracker import BurstTracker
+                        self.tracker = BurstTracker(frame.shape)
+                    self.tracker.update(boxes, now)
+                    self._trim()
+                    layer = self.layer
+                    if layer in ("pose", "gestures", "body"):
+                        self._pose_pass(frame, boxes)
+                    if layer == "plates":
+                        # 2026-08-17: operator wants LPR to run on live streams
+                        # regardless of kind. YouTube pixels are compressed and
+                        # OCR often fails on them, but the failure is honest
+                        # (empty plate string) and the ATTEMPT is what the
+                        # operator asked for. The old YouTube-blanket skip is
+                        # gone; a per-track cache + confidence gate inside
+                        # attach_plates still stops the pass from wasting cycles
+                        # on unreadable crops.
+                        self._plates_pass(frame)
+                    if layer == "parking":
+                        self._parking_probe(frame)
+                        self._auto_parking_tick(frame.shape, now)
+                    if layer == "fire":
+                        self._fire_pass(frame)
+                    faces_list: list[dict] = []
+                    if layer == "faces":
+                        faces_list = self._faces_pass(frame, boxes)
+                    self._accumulate(frame, boxes, now)
+                    img = self._render(frame, faces_list, layer)
+                    self._publish(img)
+                    self._publish_data(frame.shape, boxes, layer, faces_list)
+                except Exception as tick_err:  # noqa: BLE001
+                    if not _tick_err_logged:
+                        _tick_err_logged = True
+                        import traceback as _tb
+                        print(f"live-analysis {self.cam_id}: tick error "
+                              f"(surviving next frame) "
+                              f"{type(tick_err).__name__}: {tick_err}")
+                        _tb.print_exc()
+                    self._publish_note(
+                        f"tick error, retrying: "
+                        f"{type(tick_err).__name__}")
                 dt = time.time() - t0
                 wait = max(0.0, TICK_TARGET_S - dt)
                 if wait and self.stop_event.wait(wait):
@@ -1774,9 +1835,10 @@ class LiveSession(threading.Thread):
         except Exception:
             self._fail += 1
             return None
-        # Screen-capture fallback (yt-dlp blocked, SCREEN_CAPTURE_FALLBACK=1
-        # in env). The sentinel URL has no host, no manifest, no shared
-        # decoder; grab_frame(sentinel) short-circuits to PIL ImageGrab.
+        # Screen-capture sentinel bypasses the persistent VideoCapture
+        # entirely: grab_frame() routes screen:// straight into
+        # screen_capture.capture(). Ticks per-frame instead of a
+        # persistent reader (there's no HLS stream to demux).
         if url and url.startswith("screen://"):
             frame = grab_frame(url)
             if frame is None:
@@ -1883,6 +1945,29 @@ class LiveSession(threading.Thread):
         from app.plates import attach_plates, load_ocr, load_plate_model
         if not hasattr(self, "_plate_reads"):
             self._plate_reads: dict[int, dict] = {}
+        # SC feedback-loop gate: when the user tabs away from the video
+        # tab, screen capture keeps grabbing whatever is currently on
+        # the primary display - the chat pane, another window, the
+        # taskbar. Those "frames" occasionally clear YOLO's motorcycle/
+        # car threshold on text UI elements, and then the plate reader
+        # OCRs strings out of the surrounding text and calls them
+        # plates. Skip the plates pass entirely on frames that look like
+        # solid-color UI content instead of a street scene: a real
+        # camera frame has ~30-60% pixel variance across colours; chat/
+        # editor frames are >80% one dominant colour (usually near-
+        # white or the editor's dark theme). Bail on both extremes.
+        try:
+            import numpy as _np
+            _gray = frame.mean(axis=2) if frame.ndim == 3 else frame
+            _dominant = float(_np.mean(
+                ((_gray < 40) | (_gray > 230)).astype(_np.float32)))
+            if _dominant > 0.80:
+                # A chat/editor screenshot is >80% white or >80% dark.
+                # Don't waste OCR budget on it AND don't pollute the
+                # Investigation gallery with UI screenshots.
+                return
+        except Exception:
+            pass
         try:
             attach_plates(load_plate_model(), load_ocr(), frame,
                           self.tracker, self._plate_reads,
@@ -1894,6 +1979,54 @@ class LiveSession(threading.Thread):
                 self._plates_err_once = True
                 print(f"live-analysis {self.cam_id}: plates pass disabled "
                       f"({type(e).__name__}: {e})")
+            return
+        # Auto-save plate crops to the Investigation gallery (operator
+        # request 2026-08-18). One event per unique plate text (OCR-
+        # deduped) - a busy street with 20 vehicles doesn't flood the
+        # gallery with 20 identical reads of the same passing car. Cap
+        # the session pool at PLATE_AUTO_SAVE_CAP to keep saved.json
+        # scannable in the UI.
+        #
+        # 2026-08-21 (operator report): the text-based dedup let the SAME
+        # track re-save whenever the OCR "text" wobbled (an extra space,
+        # a look-alike digit, a raised confidence). Switch to per-tid
+        # dedup with a long backoff: once a tracker id (`tid`) has been
+        # saved for this session, don't save it AGAIN until at least
+        # PLATE_TID_DEDUP_S seconds passed (default 300 s = 5 min). A
+        # new tid = a new vehicle in the tracker's own accounting, so
+        # this cleanly separates "same car staying visible" from
+        # "different car passing later".
+        PLATE_TID_DEDUP_S = 300.0
+        if not hasattr(self, "_plate_emitted"):
+            # tid -> last_saved_ts (float)
+            self._plate_emitted: dict[int, float] = {}
+        _now_dedup = time.time()
+        if len(self._plate_emitted) >= PLATE_AUTO_SAVE_CAP:
+            return
+        for tr in (self.tracker.open if self.tracker else []):
+            if not tr.boxes:
+                continue
+            b = tr.boxes[-1]
+            text = b.get("plate")
+            pbox = b.get("plate_box")
+            if not text or not pbox:
+                continue
+            tid = tr.tid
+            _last_ts = self._plate_emitted.get(tid, 0.0)
+            if _now_dedup - _last_ts < PLATE_TID_DEDUP_S:
+                continue
+            self._plate_emitted[tid] = _now_dedup
+            box = {"x1": pbox[0], "y1": pbox[1],
+                   "x2": pbox[2], "y2": pbox[3]}
+            try:
+                self._emit_event("plates",
+                                 f"plate: {text} "
+                                 f"({b.get('plate_conf', 0):.2f})",
+                                 box, auto_save=True, tight_crop=True)
+            except Exception:
+                pass
+            if len(self._plate_emitted) >= PLATE_AUTO_SAVE_CAP:
+                break
 
     def _faces_pass(self, frame, boxes: list[dict] | None = None
                      ) -> list[dict]:
@@ -2475,9 +2608,16 @@ class LiveSession(threading.Thread):
         when both the ratio AND the absolute floor gates trip, plus a
         per-tid cooldown so one anomaly doesn't paint every following
         tick red until the streak decays."""
+        # Per-dict init: _body_kp_flag_ts is SHARED with _bbox_sudden_check
+        # (bbox fallback path) which also flags fighting. Guarding the three
+        # dicts under a single hasattr on _body_kp_hist wiped the flag_ts
+        # dict on the first pose-path call, silently dropping every fighting
+        # event whose first-seen track had no pose keypoints.
         if not hasattr(self, "_body_kp_hist"):
             self._body_kp_hist: dict[int, list[float]] = {}
+        if not hasattr(self, "_body_kp_prev"):
             self._body_kp_prev: dict[int, list] = {}
+        if not hasattr(self, "_body_kp_flag_ts"):
             self._body_kp_flag_ts: dict[int, float] = {}
         prev = self._body_kp_prev.get(tid)
         self._body_kp_prev[tid] = kps
@@ -2684,6 +2824,39 @@ class LiveSession(threading.Thread):
                     except Exception:
                         pass
             js_boxes.append(jb)
+        # Fighting pass: any two person tracks that BOTH tripped the
+        # sudden-motion gate within the last FIGHT_COOLDOWN_S seconds AND
+        # are within BODY_FIGHT_MAX_DIST_PX pixels centroid-to-centroid.
+        # Upgrades their "sudden_motion" flag to "fighting" so the layer
+        # can distinguish a lone punch/kick from an actual altercation.
+        if layer == "body":
+            try:
+                _fnow = time.time()
+                sudden_active = {
+                    tid for tid, ts in
+                    getattr(self, "_body_kp_flag_ts", {}).items()
+                    if _fnow - ts < BODY_FIGHT_COOLDOWN_S
+                }
+                if len(sudden_active) >= 2:
+                    person_jbs = [b for b in js_boxes
+                                  if b.get("cls") == "person"
+                                  and b.get("track_id") in sudden_active]
+                    for i, b1 in enumerate(person_jbs):
+                        cx1 = (b1["x1"] + b1["x2"]) / 2.0
+                        cy1 = (b1["y1"] + b1["y2"]) / 2.0
+                        for b2 in person_jbs[i + 1:]:
+                            cx2 = (b2["x1"] + b2["x2"]) / 2.0
+                            cy2 = (b2["y1"] + b2["y2"]) / 2.0
+                            d = ((cx1 - cx2) ** 2
+                                 + (cy1 - cy2) ** 2) ** 0.5
+                            if d <= BODY_FIGHT_MAX_DIST_PX:
+                                for b in (b1, b2):
+                                    b["flag"] = "fighting"
+                                    b["alert"] = True
+                                    b["flags"] = ["pair burst < "
+                                                  f"{BODY_FIGHT_MAX_DIST_PX}px"]
+            except Exception:
+                pass
         cap_ts = getattr(self, "_last_frame_ts", None) or time.time()
         # The ytproxy measures the offset under the CATALOG id (that is the
         # ?cam= it serves); for a local-picker slot self.cam_id is the slot
@@ -2766,10 +2939,17 @@ class LiveSession(threading.Thread):
             in_range = [b for b in veh
                         if (b["x2"] - b["x1"]) >= MIN_VEHICLE_W]
             read = [b for b in veh if b.get("plate")]
+            import os as _os_env
+            _langs_env = (_os_env.environ.get("PLATE_OCR_LANGS") or "").lower()
+            _extra_langs = [l for l in _langs_env.split(",")
+                            if l.strip() and l.strip() not in ("latin", "en")]
+            _script_hint = (f"digits+Latin+[{','.join(_extra_langs)}]"
+                            if _extra_langs
+                            else "digits+Latin; non-Latin scripts disabled "
+                                 "(set PLATE_OCR_LANGS=latin,th,ar,ja to enable)")
             data["envelope"] = (
                 f"{len(veh)} vehicles · {len(in_range)} in plate range "
-                f"(>={MIN_VEHICLE_W}px wide) · {len(read)} read "
-                f"(digits+Latin; Thai/Arabic/Japanese script out of alphabet)")
+                f"(>={MIN_VEHICLE_W}px wide) · {len(read)} read ({_script_hint})")
         # Operating-envelope note per pose-family layer: how many people
         # were in scene vs how many passed the size gates, so an empty
         # overlay reads as an honest "out of range", not a failure.
@@ -2838,7 +3018,22 @@ class LiveSession(threading.Thread):
 
     EV_RING = 50
 
-    def _emit_event(self, layer: str, text: str, box: dict | None = None):
+    def _emit_event(self, layer: str, text: str, box: dict | None = None,
+                    *, auto_save: bool = False,
+                    tight_crop: bool = False):
+        """Push one detection event into the session's ring buffer.
+
+        auto_save   - immediately persist the event to the on-disk
+                      gallery (Investigation tab); default False so the
+                      operator still has to click Save for most layers.
+                      Set True by the plates layer for its auto-extract-
+                      plate-crop pipeline (2026-08-18).
+        tight_crop  - crop stored on disk uses NO padding around the
+                      given box (the box IS the object of interest, eg
+                      a plate). Default False keeps the historic 25%
+                      padding so a whole-vehicle proof crop still shows
+                      surrounding context.
+        """
         # Persist the raw event to the on-disk sink FIRST - even if the
         # frame is None (a caption-only alert), the event still belongs
         # in the append-only log the CSV export reads from.
@@ -2870,8 +3065,12 @@ class LiveSession(threading.Thread):
                     cv2.LINE_AA)
         crop = annotated
         if box is not None:
+            # tight_crop=True: the box IS the object (a plate crop).
+            # Otherwise pad 25% around it so the gallery thumbnail keeps
+            # some context (which car, which side of the frame, etc).
+            _pad_frac = 0.0 if tight_crop else 0.25
             bw, bh = box["x2"] - box["x1"], box["y2"] - box["y1"]
-            px, py = bw * 0.25, bh * 0.25
+            px, py = bw * _pad_frac, bh * _pad_frac
             x1 = max(0, int(box["x1"] - px)); y1 = max(0, int(box["y1"] - py))
             x2 = min(W, int(box["x2"] + px)); y2 = min(H, int(box["y2"] + py))
             if x2 - x1 > 4 and y2 - y1 > 4:
@@ -2892,6 +3091,14 @@ class LiveSession(threading.Thread):
               "_full": fj.tobytes()}   # server-side only, dropped on GET
         with self.lock:
             self.events.append(ev)
+        if auto_save:
+            # Skip the user's Save click - persist immediately to the
+            # Investigation gallery. Silent-on-failure so a disk hiccup
+            # never takes down the tick.
+            try:
+                self.save_event(ev["id"])
+            except Exception:
+                pass
 
     def _detect_events(self, js_boxes, layer, data, faces_list) -> None:
         """Layer-specific state changes -> the event ring. A tick that
@@ -3147,6 +3354,24 @@ class LiveAnalysisManager:
         session releases the pause automatically."""
         with self._lock:
             return any(s.is_alive() for s in self._sessions.values())
+
+    def clear_saved_state(self) -> None:
+        """Reset per-session dedup + event-ring state that /api/analysis/
+        saved-clear invalidated. Without this, already-seen plates stay
+        in _plate_emitted for the rest of the session so the gallery
+        cannot refill on the same passing car, and the event strip keeps
+        offering Save on rows whose disk copies were just deleted."""
+        with self._lock:
+            sessions = list(self._sessions.values())
+        for s in sessions:
+            try:
+                with s.lock:
+                    if hasattr(s, "_plate_emitted"):
+                        s._plate_emitted.clear()
+                    if hasattr(s, "events"):
+                        s.events.clear()
+            except Exception:
+                pass
 
     def data(self, cam_id: str) -> dict | None:
         """Same idle-clock refresh as frame(), but returns the JSON snapshot

@@ -239,12 +239,33 @@ _REVIEW_STORE_LOCK = threading.Lock()
 # on submit and the dict resets with the process.
 _LAST_SERVED_CROPS: dict[str, tuple] = {}
 
+class _NullReviewStore:
+    """Stand-in for the removed labels.ReviewStore. Callers can still ask
+    for summary/verdicts without a 500; they just see an empty state.
+    Every method returns a benign default so the frame-review UI degrades
+    cleanly instead of crashing."""
+    def summary(self): return {"reviews": 0, "correct": 0, "wrong": 0,
+                                "unsure": 0, "header_line": "reviews: 0"}
+    def submit(self, *_a, **_k): return type("R", (), {"to_public": lambda s: {}})()
+    def submit_frame(self, *_a, **_k):
+        return type("R", (), {"to_public": lambda s: {}, "box_verdicts": {},
+                              "missed_detections": []})()
+    def is_frame_reviewed(self, *_a, **_k): return False
+    def frame_verdicts(self, *_a, **_k): return {}
+
+
 def _review_store():
     global _REVIEW_STORE
     with _REVIEW_STORE_LOCK:
         if _REVIEW_STORE is None:
-            from app.labels import ReviewStore
-            _REVIEW_STORE = ReviewStore()
+            try:
+                from app.labels import ReviewStore
+                _REVIEW_STORE = ReviewStore()
+            except ImportError:
+                # app.labels was deleted with the Category B cleanup - the
+                # review-frame UI still polls these routes, so give it a
+                # null store that answers cleanly instead of a 500.
+                _REVIEW_STORE = _NullReviewStore()
         return _REVIEW_STORE
 
 
@@ -352,9 +373,6 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/crossings":
             self._get_crossings()
             return
-        if path == "/api/screen-capture/bbox":
-            self._screen_capture_bbox_get()
-            return
         if path == "/api/events.jsonl":
             self._events_jsonl()
             return
@@ -363,6 +381,12 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         if path == "/api/system":
             self._system_info()
+            return
+        if path == "/api/system/live":
+            self._system_live()
+            return
+        if path == "/api/models/info":
+            self._models_info()
             return
         super().do_GET()
 
@@ -409,6 +433,15 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/analysis/event/save":
             self._analysis_event_save()
             return
+        if path == "/api/analysis/saved-clear":
+            self._analysis_saved_clear()
+            return
+        if path == "/api/analysis/saved-delete":
+            self._analysis_saved_delete()
+            return
+        if path == "/api/screen-capture/bbox":
+            self._screen_capture_bbox()
+            return
         if path == "/api/lines":
             self._save_line()
             return
@@ -420,9 +453,6 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         if path == "/api/zones/clear":
             self._clear_zones()
-            return
-        if path == "/api/screen-capture/bbox":
-            self._screen_capture_bbox_set()
             return
         self.send_error(404, "unknown POST endpoint")
 
@@ -585,6 +615,110 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(500, {"ok": False,
                                   "error": f"{type(e).__name__}: {e}"})
 
+    def _system_live(self) -> None:
+        """GET /api/system/live - CPU / RAM / GPU utilisation snapshot
+        for the status-bar HUD above the video player. Polled every few
+        seconds by the frontend. psutil is the only hard dep (already in
+        requirements.txt via ultralytics); pynvml is best-effort so
+        machines without an NVIDIA GPU still get a clean payload.
+        """
+        out: dict = {"ok": True}
+        try:
+            import psutil
+            # Short-interval sample (0.15 s) so the first call returns a
+            # real percent instead of 0.0 (psutil.cpu_percent(interval=None)
+            # returns 0.0 on the FIRST call of each new client - it needs
+            # two samples in the same process to compute a delta).
+            out["cpu_pct"] = float(psutil.cpu_percent(interval=0.15))
+            out["cpu_count"] = psutil.cpu_count(logical=True)
+            vm = psutil.virtual_memory()
+            out["ram_pct"] = float(vm.percent)
+            out["ram_used_gb"] = round(vm.used / (1024 ** 3), 1)
+            out["ram_total_gb"] = round(vm.total / (1024 ** 3), 1)
+        except Exception as e:
+            out["cpu_err"] = f"{type(e).__name__}: {e}"
+        # GPU discovery in preference order:
+        #   1. NVIDIA via pynvml (utilisation % + memory)
+        #   2. OpenVINO device list (identifies the Intel iGPU that
+        #      OpenVINO would use for accelerated inference - no live
+        #      utilisation numbers, just presence + name)
+        #   3. Windows WMIC as a last-resort name-only fallback
+        # If none work, GPU stays empty and the UI shows "N/A".
+        gpus = []
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            n = pynvml.nvmlDeviceGetCount()
+            for i in range(n):
+                h = pynvml.nvmlDeviceGetHandleByIndex(i)
+                util = pynvml.nvmlDeviceGetUtilizationRates(h)
+                mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+                name = pynvml.nvmlDeviceGetName(h)
+                if isinstance(name, bytes):
+                    name = name.decode()
+                gpus.append({
+                    "name": name, "util_pct": float(util.gpu),
+                    "mem_pct": round(100.0 * mem.used / max(1, mem.total), 1),
+                    "mem_used_gb": round(mem.used / (1024 ** 3), 1),
+                    "mem_total_gb": round(mem.total / (1024 ** 3), 1),
+                    "source": "nvidia",
+                })
+            try:
+                pynvml.nvmlShutdown()
+            except Exception as _shut:
+                # Cleanup best-effort; a failed shutdown is not fatal.
+                if os.environ.get("HW_PROBE_DEBUG"):
+                    print(f"hw-probe: nvml shutdown failed: "
+                          f"{type(_shut).__name__}: {_shut}")
+        except Exception as _nv:
+            # Anticipated: no NVIDIA driver / pynvml missing / no GPU.
+            # OpenVINO discovery below covers the Intel iGPU case. Set
+            # HW_PROBE_DEBUG=1 to see the specific pynvml failure.
+            if os.environ.get("HW_PROBE_DEBUG"):
+                print(f"hw-probe: pynvml unavailable: "
+                      f"{type(_nv).__name__}: {_nv}")
+        if not gpus:
+            try:
+                import openvino as ov
+                core = ov.Core()
+                for dev in core.available_devices:
+                    if dev.startswith("GPU"):
+                        try:
+                            name = core.get_property(dev, "FULL_DEVICE_NAME")
+                        except Exception:
+                            name = dev
+                        gpus.append({"name": str(name), "source": "openvino"})
+            except Exception:
+                pass
+        if not gpus and os.name == "nt":
+            try:
+                import subprocess
+                r = subprocess.run(
+                    ["wmic", "path", "win32_VideoController", "get", "name"],
+                    capture_output=True, text=True, timeout=3, check=False)
+                for line in (r.stdout or "").splitlines()[1:]:
+                    s = line.strip()
+                    if s:
+                        gpus.append({"name": s, "source": "wmic"})
+            except Exception:
+                pass
+        out["gpus"] = gpus
+        self._send_json(200, out)
+
+    def _models_info(self) -> None:
+        """GET /api/models/info - static + measured metrics on every
+        weight file the pipeline consumes, plus a benchmark of the live
+        inference latency on this machine. Feeds the Model Information
+        tab. Cached in memory once computed since file sizes and static
+        reference metrics don't change between requests.
+        """
+        try:
+            from app.model_metrics import gather_models_info
+            self._send_json(200, {"ok": True, **gather_models_info()})
+        except Exception as e:
+            self._send_json(500, {"ok": False,
+                                  "error": f"{type(e).__name__}: {e}"})
+
     def _events_jsonl(self) -> None:
         """GET /api/events.jsonl?cam=<id>[&limit=<N>] - append-only event
         log served as newline-delimited JSON, newest last (chronological
@@ -656,42 +790,6 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         super().end_headers()
         self.wfile.write(payload)
-
-    # ---- Screen-capture bbox (screen://primary YouTube fallback) ---------
-    # GET  /api/screen-capture/bbox           -> current bbox (or null)
-    # POST /api/screen-capture/bbox           body: {"x1":..,"y1":..,"x2":..,"y2":..}
-    #                                         or {"clear":true} to reset
-    # Client posts this after each analysis session start so screen://primary
-    # frames are cropped exactly to the video iframe on the operator's screen.
-    def _screen_capture_bbox_get(self) -> None:
-        from app.screen_capture import get_region
-        r = get_region()
-        self._send_json(200, {"ok": True,
-                              "bbox": list(r) if r else None})
-
-    def _screen_capture_bbox_set(self) -> None:
-        n = int(self.headers.get("Content-Length") or 0)
-        if n <= 0 or n > 1024:
-            self.send_error(400, "empty or oversized body"); return
-        try:
-            data = json.loads(self.rfile.read(n).decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            self.send_error(400, "body must be JSON"); return
-        from app.screen_capture import set_region
-        if data.get("clear"):
-            set_region(None)
-            self._send_json(200, {"ok": True, "bbox": None})
-            return
-        try:
-            bbox = (int(data["x1"]), int(data["y1"]),
-                    int(data["x2"]), int(data["y2"]))
-        except (KeyError, TypeError, ValueError):
-            self.send_error(400, "need x1,y1,x2,y2 or clear:true"); return
-        try:
-            set_region(bbox)
-        except ValueError as e:
-            self.send_error(400, str(e)); return
-        self._send_json(200, {"ok": True, "bbox": list(bbox)})
 
     def _send_json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -956,6 +1054,39 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         stopped = MANAGER.stop(cam) if cam else False
         self._send_json(200, {"ok": True, "stopped": stopped})
 
+    def _screen_capture_bbox(self) -> None:
+        """POST /api/screen-capture/bbox
+        Body: {"x1": int, "y1": int, "x2": int, "y2": int}  (physical pixels)
+        Sets the screen-capture region so the fallback grabs the video
+        area only, not the whole desktop. Pass an empty body or all-zero
+        values to clear back to full primary display."""
+        import json
+        raw = b""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if length > 0 else b""
+            payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception as e:
+            self._send_json(400, {"error": f"bad JSON: {e}"})
+            return
+        try:
+            from app.screen_capture import set_region
+        except Exception as e:
+            self._send_json(500, {"error": f"screen_capture unavailable: {e}"})
+            return
+        bbox = None
+        if payload and all(k in payload for k in ("x1", "y1", "x2", "y2")):
+            x1, y1, x2, y2 = (int(payload["x1"]), int(payload["y1"]),
+                              int(payload["x2"]), int(payload["y2"]))
+            if x2 > x1 and y2 > y1:
+                bbox = (x1, y1, x2, y2)
+        try:
+            set_region(bbox)
+        except Exception as e:
+            self._send_json(400, {"error": f"invalid bbox: {e}"})
+            return
+        self._send_json(200, {"ok": True, "bbox": list(bbox) if bbox else None})
+
     def _analysis_events(self) -> None:
         """GET /api/analysis/events?cam=<id> - the session's detection
         event ring (newest first, thumbs only; full frames stay on the
@@ -997,6 +1128,116 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         except (OSError, ValueError):
             items = []
         self._send_json(200, {"items": items})
+
+    def _analysis_saved_delete(self) -> None:
+        """POST /api/analysis/saved-delete?id=<event_id> - remove ONE saved
+        event: drop its row from saved.json and unlink its jpg. Operator-
+        triggered from the per-tile delete button in the Investigation
+        gallery."""
+        import json as _json
+        from pathlib import Path
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        event_id = (q.get("id") or [""])[0].strip()
+        if not event_id:
+            self._send_json(400, {"ok": False, "error": "missing ?id="})
+            return
+        det_dir = (Path(__file__).resolve().parent.parent / "web"
+                   / "snapshots" / "detections")
+        man = det_dir / "saved.json"
+        try:
+            items = _json.loads(man.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            items = []
+        removed_row = None
+        kept = []
+        for it in items:
+            if str(it.get("id")) == event_id:
+                removed_row = it
+                continue
+            kept.append(it)
+        removed_files = 0
+        if removed_row:
+            img_rel = removed_row.get("image") or ""
+            # image field is "snapshots/detections/<cam>_<id>.jpg"; anchor
+            # at web/ and unlink. Guard against traversal (any '..').
+            if img_rel and ".." not in img_rel:
+                web_root = det_dir.parent.parent
+                p = web_root / img_rel.replace("/", "\\") \
+                    if "\\" in str(web_root) else web_root / img_rel
+                # Cross-platform: also try forward-slash join.
+                try_paths = [web_root / img_rel, det_dir /
+                             img_rel.rsplit("/", 1)[-1]]
+                for candidate in try_paths:
+                    try:
+                        if candidate.is_file():
+                            candidate.unlink()
+                            removed_files += 1
+                    except OSError:
+                        pass
+        try:
+            man.write_text(_json.dumps(kept), encoding="utf-8")
+        except OSError as e:
+            self._send_json(500, {"ok": False,
+                                  "error": f"{type(e).__name__}: {e}"})
+            return
+        # Clear the per-tid dedup on the running plates session so a
+        # re-passing vehicle with the same tid can re-emit. 2026-08-21:
+        # _plate_emitted is a dict keyed by tid, not a set of text keys,
+        # so we cannot target one entry from the row alone - operator
+        # intent (delete one gallery card, allow it to re-appear next
+        # time the car goes by) is best served by clearing the whole
+        # dedup dict on the session. A busy street then re-fills naturally
+        # over the next few minutes.
+        try:
+            from app.live_analysis import MANAGER as _MGR
+            for s in _MGR._sessions.values():
+                if hasattr(s, "_plate_emitted"):
+                    try:
+                        s._plate_emitted.clear()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        self._send_json(200, {"ok": True, "removed": bool(removed_row),
+                              "files_unlinked": removed_files})
+
+    def _analysis_saved_clear(self) -> None:
+        """POST /api/analysis/saved-clear - delete every saved detection
+        crop from disk and truncate the manifest. Operator-triggered from
+        the Investigation tab's Clear all button."""
+        import json as _json
+        from pathlib import Path
+        det_dir = (Path(__file__).resolve().parent.parent / "web"
+                   / "snapshots" / "detections")
+        removed = 0
+        try:
+            if det_dir.is_dir():
+                for p in det_dir.iterdir():
+                    if p.is_file() and p.name != "saved.json" \
+                            and p.name != ".gitkeep":
+                        try:
+                            p.unlink()
+                            removed += 1
+                        except OSError:
+                            pass
+            man = det_dir / "saved.json"
+            man.parent.mkdir(parents=True, exist_ok=True)
+            man.write_text(_json.dumps([]), encoding="utf-8")
+        except Exception as e:
+            self._send_json(500, {"ok": False,
+                                  "error": f"{type(e).__name__}: {e}"})
+            return
+        # Wipe in-memory dedup so already-seen plates can re-emit and the
+        # event strip no longer offers Save on rows whose disk copies just
+        # got deleted. Best-effort: a missing MANAGER (module not imported
+        # yet) is a no-op, same as before.
+        try:
+            from app.live_analysis import MANAGER as _MGR
+            _MGR.clear_saved_state()
+        except Exception:
+            pass
+        self._send_json(200, {"ok": True, "removed": removed})
 
     def _visual_search(self) -> None:
         """POST /api/search  (or /api/visual-search - the legacy alias).
@@ -1096,6 +1337,12 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(200, result)
         except ValueError as e:
             self._send_json(400, {"error": str(e)})
+        except ImportError as e:
+            # The visual-search / review_frames / frame_crops modules were
+            # removed with the Category B cleanup. Return an empty payload
+            # so the frontend renders "no results" cleanly instead of 500.
+            self._send_json(200, {"results": [], "detector": "unavailable",
+                                   "note": f"visual-search removed: {e}"})
         except Exception as e:
             print(f"  ! visual-search failed: {type(e).__name__}: {e}")
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
@@ -1458,8 +1705,14 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     or not eid_raw.isdigit():
                 self._send_json(400, {"error": "cam_id and numeric entity_id required"})
                 return
-            from app.entity_gallery import list_sightings
-            items = list_sightings(cam_id, int(eid_raw), SNAPSHOTS_DIR)
+            try:
+                from app.entity_gallery import list_sightings
+                items = list_sightings(cam_id, int(eid_raw), SNAPSHOTS_DIR)
+            except ImportError:
+                # entity_gallery was deleted with the Category B cleanup;
+                # the accordion still calls this endpoint - give it an
+                # empty list so it renders "no sightings" cleanly.
+                items = []
             self._send_json(200, {"cam_id": cam_id, "entity_id": int(eid_raw),
                                   "sightings": items})
         except Exception as e:
@@ -1607,8 +1860,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
         Includes `url` so the frontend can render the source directly - a
         `youtube` kind camera needs its watch URL to embed the iframe player
-        without a backend yt-dlp resolve (yt-dlp is often blocked by
-        YouTube's bot check on hosts without exported cookies).
+        without a backend yt-dlp resolve.
         """
         try:
             from app.cameras import active_cameras

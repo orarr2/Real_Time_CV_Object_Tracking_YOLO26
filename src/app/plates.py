@@ -61,17 +61,55 @@ PLATE_CROP_MIN_INTERVAL_S = 2.0
 _PLATE_CROPS_LAST_SAVE: dict[tuple[str, int], float] = {}
 _PLATE_FILENAME_SAFE = re.compile(r"[^0-9A-Za-z_-]+")
 
-# Weights: bare names resolve against the process CWD (the project root,
-# same convention as the detection/pose weights). Both are gitignored
-# binaries - see the module docstring for their public sources.
-PLATE_WEIGHTS_DEFAULT = "yolov8n-plate.pt"
-PLATE_OCR_DEFAULT = "plate_ocr_global.onnx"
+# Weights: locate via src/ first, then project root, then bare CWD-relative
+# so the loaders work regardless of whether serve.py is launched from src/
+# (default) or from the repo root (notebook layout). Both binaries are
+# gitignored - see the module docstring for their public sources.
+_SRC_ROOT = Path(__file__).resolve().parent.parent   # .../src
+_REPO_ROOT = _SRC_ROOT.parent                        # repo root
+
+
+def _find_weight(bare_name: str) -> str:
+    """Return the first existing path for a weight file, checking src/
+    then repo root; falls back to the bare name (CWD-relative) so
+    Ultralytics can still auto-download if configured."""
+    for candidate in (_SRC_ROOT / bare_name, _REPO_ROOT / bare_name):
+        if candidate.is_file():
+            return str(candidate)
+    return bare_name
+
+
+# 2026-08-21: upgraded plate detector from yolov8n-plate (nano, ~6 MB,
+# operator note "may be too weak") to YOLOv11-s license-plate finetune
+# (~19 MB, morsetechlab/yolov11-license-plate-detection on HF, 71k+
+# downloads). YOLOv11 architecture + Small variant + LP-only training
+# lifts recall on partly-obscured / motorcycle / small-in-frame plates,
+# still runs on CPU inside the tick budget. Falls back to yolov8n-plate
+# if the newer file isn't on disk, so an operator who hasn't downloaded
+# it yet keeps the pre-upgrade behavior.
+PLATE_WEIGHTS_DEFAULT = _find_weight("yolov11s-plate.pt")
+if not os.path.isfile(PLATE_WEIGHTS_DEFAULT):
+    PLATE_WEIGHTS_DEFAULT = _find_weight("yolov8n-plate.pt")
+PLATE_OCR_DEFAULT = _find_weight("plate_ocr_global.onnx")
 
 # Plate-detector confidence floor on the vehicle crop. Permissive on
 # purpose: the crop IS a vehicle (the detector vouched for it), so a
 # plate-shaped hit is almost certainly the plate; the OCR confidence
 # gate downstream is the real filter.
-PLATE_CONF = 0.30
+PLATE_CONF = 0.05   # was 0.10; more permissive to catch far/small plates on
+                    # street cams. False positives are handled downstream by
+                    # OCR gate + _PLATE_CLASS_NAME_NOISE filter (see below).
+
+# 2026-08-21: with screen-capture SC picking up the dashboard's OWN
+# canvas overlay (the "motorcycle 91%" YOLO26 labels drawn on top of the
+# iframe), the plate detector was reading those overlay strings as if
+# they were plates ("motorcycle", "car", etc.). Reject any OCR result
+# that matches a class label - a real plate never spells one of these.
+_PLATE_CLASS_NAME_NOISE = frozenset({
+    "motorcycle", "motorbike", "car", "truck", "bus", "bicycle", "bike",
+    "person", "people", "animal", "train", "youtube", "livestream",
+    "koh", "samui", "thailand", "chaweng", "webcam", "live", "street",
+})
 # fast-plate-ocr cct_xs_relu_v1_global contract (from its shipped
 # plate_config.yaml, inlined so the .yaml need not live in the repo):
 OCR_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_"
@@ -99,14 +137,21 @@ MIN_VEHICLE_W_MOTO = int(os.environ.get("PLATE_MIN_VEHICLE_W_MOTO") or 40)
 # now that FSRCNN can rescue small crops before OCR.
 MIN_PLATE_W = int(os.environ.get("PLATE_MIN_PLATE_W") or 16)
 # Bounded work per tick: closest (widest) unread vehicles first.
-MAX_VEHICLES_PER_TICK = 3
+MAX_VEHICLES_PER_TICK = int(os.environ.get("PLATE_MAX_VEHICLES_PER_TICK") or 6)
+# 2026-08-21: bumped from 3 -> 6 so more far/small motorcycles in a
+# busy Chaweng frame get a plate attempt instead of only the widest 3.
+# Tick cost scales linearly; on the OpenVINO CPU path the whole plate
+# pass at 6 vehicles is still under 400 ms.
 # Give up on a track after this many failed read attempts; a vehicle
 # that stayed unreadable for 6 close-range ticks is angled/blurred.
 MAX_TRIES_PER_TRACK = 6
 # Minimum Laplacian variance of the plate crop before OCR is attempted -
 # below this the crop is motion-smeared (night exposure) and any read
 # would be a hallucination. Skipped crops refund their try.
-PLATE_SHARPNESS_MIN = 45.0
+PLATE_SHARPNESS_MIN = 12.0   # was 45.0; ESPCN 4x + reencoded YouTube stream
+                             # smooths edges, so Laplacian variance rarely
+                             # clears 45 even on readable plates
+                             # (2026-08-20 investigation)
 # An exhausted-but-unread track gets a fresh try budget this often. A
 # parked vehicle's track lives for hours; without the reset its only
 # chances were the session's first few ticks.
@@ -128,7 +173,7 @@ PLATE_VEHICLE_CLASSES = {"car", "bus", "truck", "motorcycle"}
 # isn't importable. Pre-change behavior is preserved when everything is
 # off, so single-country deployments that don't want the RAM cost keep
 # working unchanged.
-PLATE_SR_MODEL_DEFAULT = "models/FSRCNN_x4.pb"    # OpenCV DNN Super-Res model
+PLATE_SR_MODEL_DEFAULT = _find_weight("models/ESPCN_x4.pb")  # OpenCV DNN Super-Res model
 PLATE_SR_MIN_W = 96                                # skip SR if plate already large
 PLATE_MULTI_CROP_MAX = 5                            # per-track crop buffer size
 
@@ -162,12 +207,17 @@ def load_sr_model(path: str | None = None):
             import cv2
             sr = cv2.dnn_superres.DnnSuperResImpl_create()
             sr.readModel(p)
-            # Model filename encodes scale (FSRCNN_x4.pb -> 4x)
+            # Model filename encodes family + scale (ESPCN_x4.pb -> espcn 4x,
+            # FSRCNN_x3.pb -> fsrcnn 3x, EDSR_x2.pb -> edsr 2x).
             name = os.path.basename(p).lower()
             scale = 4 if "x4" in name else (3 if "x3" in name else 2)
-            sr.setModel("fsrcnn", scale)
+            family = ("espcn" if "espcn" in name
+                      else "edsr" if "edsr" in name
+                      else "lapsrn" if "lapsrn" in name
+                      else "fsrcnn")
+            sr.setModel(family, scale)
             _sr_model = sr
-            print(f"plates: super-res loaded (FSRCNN x{scale}, {p})")
+            print(f"plates: super-res loaded ({family.upper()} x{scale}, {p})")
         except AttributeError:
             print("plates: opencv-contrib-python not installed - "
                   "super-res disabled (raw crops -> OCR)")
@@ -177,7 +227,7 @@ def load_sr_model(path: str | None = None):
 
 
 def _upscale_for_ocr(plate_bgr):
-    """Upscale a plate crop 4x with FSRCNN if the model loaded and the
+    """Upscale a plate crop 4x with ESPCN if the model loaded and the
     crop is small; otherwise return the crop unchanged. A crop already
     wide enough (>= PLATE_SR_MIN_W) is kept as-is - upscaling further
     only adds latency without adding information."""
@@ -192,6 +242,37 @@ def _upscale_for_ocr(plate_bgr):
         return sr.upsample(plate_bgr)
     except Exception:
         return plate_bgr
+
+
+def _enhance_for_ocr(plate_bgr):
+    """Second-stage OCR helper: contrast-normalise the plate crop with
+    CLAHE (Contrast-Limited Adaptive Histogram Equalisation) applied to
+    the luminance channel, then upscale. Returns a NEW BGR crop suitable
+    for another OCR pass alongside the raw one - the caller runs both
+    variants through OCR and keeps whichever confidence wins.
+
+    Two-stage OCR (operator request 2026-08-18): stage A reads the raw
+    upscaled plate; stage B reads the CLAHE-enhanced plate. Night crops
+    where the plate is dark-on-dark tend to fail stage A but clear stage
+    B; well-lit daytime crops often win on stage A because CLAHE can
+    over-sharpen already-clean text. Best-of the two, cheap since both
+    are single-model inferences on a tiny crop.
+    """
+    if plate_bgr is None or plate_bgr.size == 0:
+        return plate_bgr
+    try:
+        import cv2
+        # LAB gives us a physical luminance channel to equalise; RGB
+        # equalisation shifts colour balance which some OCR heads treat
+        # as noise.
+        lab = cv2.cvtColor(plate_bgr, cv2.COLOR_BGR2LAB)
+        L, A, B = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        L2 = clahe.apply(L)
+        enhanced = cv2.cvtColor(cv2.merge([L2, A, B]), cv2.COLOR_LAB2BGR)
+    except Exception:
+        return plate_bgr
+    return _upscale_for_ocr(enhanced)
 
 
 def load_plate_model(weights: str | None = None):
@@ -230,12 +311,41 @@ class _OvOcr:
         import numpy as np
         import openvino as ov
         core = ov.Core()
-        self.compiled = core.compile_model(core.read_model(path), "CPU")
+        model = core.read_model(path)
+        # ONNX exports of fast-plate-ocr carry a dynamic batch (input
+        # shape [?, 64, 128, 3]); calling int() on the dynamic first dim
+        # raises "to_shape was called on a dynamic shape" at
+        # introspection time. Detect the layout from the PartialShape
+        # (which handles dynamic dims), then reshape to a fixed
+        # [1, H, W, 3] / [1, 3, H, W] so the rest of the class can
+        # assume a static tensor. Also detect OCR_SLOTS from the
+        # OUTPUT shape - the current global model outputs 10 slots
+        # (was 9 in earlier revisions), and a hardcoded reshape target
+        # crashes with "cannot reshape array of size 370 into (9,37)".
+        pshape = model.input(0).get_partial_shape()
+        rank = pshape.rank.get_length() if pshape.rank.is_static else 4
+        # Prefer NHWC (the keras export shape 1x64x128x3). Detect NCHW by
+        # checking if the second dim is statically 3.
+        nchw = False
+        if rank == 4 and pshape[1].is_static and pshape[1].get_length() == 3:
+            nchw = True
+        target = ([1, 3, OCR_H, OCR_W] if nchw
+                  else [1, OCR_H, OCR_W, 3])
+        try:
+            model.reshape({0: target})
+        except Exception:
+            # Model already has a compatible static shape - keep as-is.
+            pass
+        self.compiled = core.compile_model(model, "CPU")
         inp = self.compiled.input(0)
         self.out = self.compiled.output(0)
-        shape = [int(d) for d in inp.get_shape()]
+        shape = list(inp.get_shape())
         self.nchw = len(shape) == 4 and shape[1] == 3
         self.uint8 = "u8" in inp.get_element_type().get_type_name()
+        # Introspect the actual slot count so a model with 10 slots
+        # (current cct_xs) OR 9 slots (older exports) reshape() cleanly.
+        out_shape = list(self.out.get_shape())
+        self.slots = out_shape[1] if len(out_shape) >= 3 else OCR_SLOTS
         self._np = np
 
     def read(self, plate_bgr) -> tuple[str, float]:
@@ -255,14 +365,14 @@ class _OvOcr:
         if self.nchw:
             x = x.transpose(2, 0, 1)
         y = self.compiled([x[None]])[self.out]
-        y = np.asarray(y).reshape(OCR_SLOTS, len(OCR_ALPHABET))
+        y = np.asarray(y).reshape(self.slots, len(OCR_ALPHABET))
         # Keras heads usually export with softmax baked in; normalize
         # defensively when rows are logits.
         if not (0.99 <= float(y[0].sum()) <= 1.01):
             e = np.exp(y - y.max(axis=1, keepdims=True))
             y = e / e.sum(axis=1, keepdims=True)
         idx = y.argmax(axis=1)
-        confs = y[np.arange(OCR_SLOTS), idx]
+        confs = y[np.arange(self.slots), idx]
         chars = [OCR_ALPHABET[i] for i in idx]
         text = "".join(c for c in chars if c != OCR_PAD)
         used = [c for ch, c in zip(chars, confs) if ch != OCR_PAD]
@@ -410,13 +520,40 @@ def _save_plate_crop(cam_id: str, tid: int, plate_bgr,
     fname = f"{ts}_{tid}_{safe_text}_{conf_tag:02d}.jpg"
     dest = _PLATE_CROPS_ROOT / safe_cam / fname
     try:
-        import cv2
+        import cv2, numpy as np
         dest.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(dest), plate_bgr)
+        # Burn a compact overlay onto the saved crop: 1) a thin green
+        # rectangle marking the plate region (which IS the whole crop,
+        # but the border reads as "detection anchor" at a glance in a
+        # gallery), and 2) an OCR banner at the bottom with the read
+        # text and confidence percentage. Prior behaviour saved bare
+        # crops and the operator couldn't tell which one said what
+        # without decoding the filename.
+        annotated = plate_bgr.copy()
+        h, w = annotated.shape[:2]
+        cv2.rectangle(annotated, (0, 0), (w - 1, h - 1), (0, 220, 0), 1)
+        caption = f"{safe_text}  {conf_tag:02d}%"
+        font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
+        (tw, th), base = cv2.getTextSize(caption, font, scale, thick)
+        pad_x, pad_y = 4, 4
+        band_h = th + base + pad_y * 2
+        # Extend the canvas downward instead of overpainting the plate
+        # itself so the license text stays readable next to the caption.
+        canvas = np.zeros((h + band_h, w, 3), dtype=annotated.dtype)
+        canvas[:h, :, :] = annotated
+        cv2.rectangle(canvas, (0, h), (w - 1, h + band_h - 1),
+                      (24, 30, 44), -1)
+        cv2.putText(canvas, caption, (pad_x, h + pad_y + th),
+                    font, scale, (255, 255, 255), thick, cv2.LINE_AA)
+        cv2.imwrite(str(dest), canvas)
     except Exception:
-        # Never let a disk hiccup kill the OCR pass - the operator
-        # would rather have live reads than a strict audit trail.
-        pass
+        # Never let a disk hiccup (or an OpenCV oddity in the overlay)
+        # kill the OCR pass - the operator would rather have live reads
+        # than a strict audit trail. Fall back to the bare crop.
+        try:
+            cv2.imwrite(str(dest), plate_bgr)
+        except Exception:
+            pass
 
 
 def attach_plates(det_model, ocr: "_MultiScriptOcr", frame, tracker,
@@ -478,6 +615,16 @@ def attach_plates(det_model, ocr: "_MultiScriptOcr", frame, tracker,
     for bw, tid, b in candidates[:MAX_VEHICLES_PER_TICK]:
         x1 = max(0, int(b["x1"]) - 4); y1 = max(0, int(b["y1"]) - 4)
         x2 = min(W, int(b["x2"]) + 4); y2 = min(H, int(b["y2"]) + 4)
+        # 2026-08-21: the "skip the top X% of the vehicle box before
+        # handing to yolov8n-plate" heuristic was catastrophic on Thai
+        # street cams - the plate detector was trained on full-vehicle
+        # context (wheels, taillights, plate frame). Feeding it just
+        # the bottom slice + then letterboxing to imgsz=640 stripped
+        # the training-time cues and recall collapsed to zero (0 reads
+        # across 100+ frames on Green Mango). Hand the FULL vehicle
+        # crop instead; the small SR-then-plate-detector cost is worth
+        # keeping the recall. Motorcycle plates specifically ride even
+        # higher on the bike so any top-slice heuristic was doubly wrong.
         crop = frame[y1:y2, x1:x2]
         if crop.size == 0:
             continue
@@ -511,7 +658,12 @@ def attach_plates(det_model, ocr: "_MultiScriptOcr", frame, tracker,
                     crop_for_det = crop
                     _cscale = 1.0
         with _PREDICT_LOCK:
-            res = det_model.predict(crop_for_det, imgsz=256,
+            # imgsz was 256; that defeated the ESPCN 4x vehicle super-res
+            # because YOLO rescaled the SR'd crop straight back down to
+            # 256 px. Bumped to 640 so a plate that reached 60-120 px
+            # after SR is still 60-120 px going into plate detection
+            # (2026-08-20 fix).
+            res = det_model.predict(crop_for_det, imgsz=640,
                                     conf=PLATE_CONF,
                                     verbose=False)[0]
         if res.boxes is None or len(res.boxes) == 0:
@@ -520,11 +672,18 @@ def attach_plates(det_model, ocr: "_MultiScriptOcr", frame, tracker,
         qi = max(range(len(confs)), key=confs.__getitem__)
         # Convert detector-coord plate box back to the ORIGINAL crop
         # coord system so downstream annotations (b["plate_box"]) match
-        # the frame the operator actually sees.
+        # the frame the operator actually sees. Plain int() truncation
+        # loses up to (_cscale - 1) px on each side once _cscale > 1,
+        # which chops the plate edges when auto-save re-crops with
+        # tight_crop=True. round() halves that error and a 1-px safety
+        # pad soaks up the remainder without visibly widening the box.
         _px1, _py1, _px2, _py2 = [float(v)
                                   for v in res.boxes.xyxy.tolist()[qi]]
-        px1 = int(_px1 / _cscale); py1 = int(_py1 / _cscale)
-        px2 = int(_px2 / _cscale); py2 = int(_py2 / _cscale)
+        _pad = 1
+        px1 = max(0, round(_px1 / _cscale) - _pad)
+        py1 = max(0, round(_py1 / _cscale) - _pad)
+        px2 = round(_px2 / _cscale) + _pad
+        py2 = round(_py2 / _cscale) + _pad
         if (px2 - px1) < MIN_PLATE_W:
             continue
         # Crop the plate from the UPSCALED vehicle image (more pixels =
@@ -561,14 +720,26 @@ def attach_plates(det_model, ocr: "_MultiScriptOcr", frame, tracker,
 
         best_text, best_conf = "", 0.0
         for _s, cr in crops_buf:
-            # Super-res tiny crops before OCR: FSRCNN x4 typically
-            # takes 12-70 ms and quadruples effective plate width, so
-            # a 22 px plate becomes 88 px - inside every OCR reader's
-            # working range.
-            cr_up = _upscale_for_ocr(cr)
-            tx, cf = ocr.read(cr_up)
-            if tx and cf > best_conf:
-                best_text, best_conf = tx, cf
+            # Two-stage OCR (operator request 2026-08-18):
+            #   stage A - raw plate upscaled by ESPCN 4x when small;
+            #   stage B - CLAHE contrast-normalised plate then upscaled.
+            # Both fast (single OCR inference each on a tiny crop), and
+            # they fail on complementary conditions (raw wins in bright
+            # daylight, CLAHE wins on dark / low-contrast night plates).
+            # Best confidence across the two variants wins.
+            for _variant in (_upscale_for_ocr(cr), _enhance_for_ocr(cr)):
+                tx, cf = ocr.read(_variant)
+                if tx and cf > best_conf:
+                    best_text, best_conf = tx, cf
+
+        # Reject OCR results that match a class label - these come from
+        # the SC feedback loop where the dashboard's own YOLO26 overlay
+        # ("motorcycle 91%") ends up back inside the captured frame and
+        # the plate detector reads the OVERLAY string as a plate. No
+        # real plate spells "motorcycle" so a class-name filter is safe.
+        if best_text and best_text.strip().lower() in _PLATE_CLASS_NAME_NOISE:
+            best_text = ""
+            best_conf = 0.0
 
         # Best-read-wins across the whole crop buffer AND all prior
         # attempts on the entry.
@@ -579,7 +750,13 @@ def attach_plates(det_model, ocr: "_MultiScriptOcr", frame, tracker,
             entry["conf"] = round(best_conf, 2)
             b["plate"] = best_text
             b["plate_conf"] = entry["conf"]
-            b["plate_box"] = [x1 + px1, y1 + py1, x1 + px2, y1 + py2]
+            # plate_box is in FRAME coords: the crop y-origin is y1
+            # (the vehicle box top edge) since 2026-08-21 we hand the
+            # full vehicle box to yolov8n-plate instead of the bottom
+            # slice. The plate detector's px1/px2/py1/py2 are already
+            # in the FULL-vehicle-crop coord system.
+            b["plate_box"] = [x1 + px1, y1 + py1,
+                              x1 + px2, y1 + py2]
         # Persist the FRESHEST crop for this tick, whatever OCR did with
         # it. The best-effort save uses either the read the pipeline
         # just decided on OR the accumulated best-so-far for this track;

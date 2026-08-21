@@ -236,27 +236,36 @@ def test_body_layer_flags_only_anomalies():
 
 
 def test_line_layer_draws_line_and_counts():
+    # 2026-08-18: IN/OUT pills moved to BOTTOM-LEFT (was top-center) so
+    # the numbers don't fight the tile's own Stop / Draw-line control row
+    # above the frame. Assert the pills appear in the lower band instead
+    # of the top - line and counters still on the same frame.
     img = np.zeros((*SHAPE, 3), dtype=np.uint8)
     out = la.draw_line_layer(img.copy(), la.DEFAULT_LINE, {"in": 3, "out": 1})
     y = int(0.62 * SHAPE[0])
     assert out[y - 3:y + 4].sum() > 0                # the line itself
-    assert out[:30].sum() > 0                        # the caption
+    assert out[-80:].sum() > 0                       # bottom pills present
 
 
 def test_heat_layer_is_signal_overlay():
-    # Restored pre-fix-3 behaviour: empty street stays a photo (only the
-    # caption band changes), a banked-dwell zone paints TURBO on top via
-    # heatmap.overlay. This is the operator's preferred style.
+    # 2026-08-17 operator request: the layer paints a FULL-FRAME thermal
+    # recolour so an operator sees IMMEDIATELY the layer is running
+    # (previously a bare photo, indistinguishable from "not working").
+    # Empty grid = INFERNO recolour of the base; a dwell cell overlays
+    # TURBO hotspots on top. Both states must differ from the flat input.
     img = np.full((*SHAPE, 3), 40, dtype=np.uint8)
     grid = [[0.0] * la.GRID_W for _ in range(la.GRID_H)]
     out = la.draw_heat_layer(img.copy(), grid)
     assert out.shape == img.shape
-    # No dwell -> pixels below the caption band are untouched.
-    assert (out[CAP_H:] == img[CAP_H:]).all()
+    # No dwell -> whole frame recoloured (INFERNO thermal), not the flat
+    # input any more.
+    assert not (out[CAP_H:] == img[CAP_H:]).all()
     grid[la.GRID_H // 2][la.GRID_W // 2] = 50.0
     out2 = la.draw_heat_layer(img.copy(), grid)
-    # Dwell zone -> body of the frame differs from the flat original.
+    # Dwell zone -> body of the frame ALSO differs, and the two rendered
+    # frames must differ from each other (TURBO hotspot vs. plain thermal).
     assert not (out2[CAP_H:] == img[CAP_H:]).all()
+    assert not (out2[CAP_H:] == out[CAP_H:]).all()
 
 
 # ---------------------------------------------------------------------------

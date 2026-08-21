@@ -73,7 +73,7 @@ def _open_cap(url_or_path: str) -> "cv2.VideoCapture":
     hasattr guards keep this working on older OpenCV builds where the
     CAP_PROP_*_TIMEOUT_MSEC properties don't exist.
     """
-    cap = cv2.VideoCapture(url_or_path)
+    cap = cv2.VideoCapture(url_or_path, cv2.CAP_FFMPEG)
     for name, ms in (("CAP_PROP_OPEN_TIMEOUT_MSEC", _STREAM_OPEN_TIMEOUT_MS),
                      ("CAP_PROP_READ_TIMEOUT_MSEC", _STREAM_READ_TIMEOUT_MS)):
         prop = getattr(cv2, name, None)
@@ -107,6 +107,13 @@ _PREDICT_LOCK = threading.RLock()
 # Torch checkpoints loaded on demand when a static-shape OpenVINO engine
 # rejects an explicit imgsz (keyed by the .pt path; see detect_with_boxes).
 _TORCH_FALLBACK: dict = {}
+
+# Toggle: when yt-dlp is blocked by YouTube's bot check, resolve to a
+# sentinel URL that grab_frame handles by capturing pixels from the
+# operator's primary display via mss (see src/app/screen_capture.py).
+_SCREEN_CAPTURE_FALLBACK = (
+    os.environ.get("SCREEN_CAPTURE_FALLBACK") or "").strip().lower() in (
+        "1", "true", "yes", "on")
 
 CLASSES_OF_INTEREST = {
     "person": 0,
@@ -225,6 +232,14 @@ def system_info() -> dict:
     label = "YOLO26 (CPU)"
     if b["backend"] == "openvino":
         label = f"YOLO26 OpenVINO ({b['device']})"
+    sc_info: dict = {"enabled": bool(_SCREEN_CAPTURE_FALLBACK), "bbox": None}
+    if _SCREEN_CAPTURE_FALLBACK:
+        try:
+            from app.screen_capture import get_region
+            r = get_region()
+            sc_info["bbox"] = list(r) if r else None
+        except Exception:
+            pass
     return {
         "model": label,
         "backend": b["backend"],
@@ -232,6 +247,7 @@ def system_info() -> dict:
         "openvino_devices": b["openvino_devices"],
         "detector_weight": "yolo26m",
         "cached": b["cached"],
+        "screen_capture": sc_info,
     }
 
 # Model input size the collector runs at. YOLO's 640 default shrinks a distant
@@ -277,8 +293,28 @@ def load_model(weights: str = "yolov8s.pt"):
             # Remember the torch checkpoint so detect_with_boxes can fall
             # back to it when a caller asks for an imgsz the static engine
             # was not exported for (e.g. the calibration cells' 960 on a
-            # 640 engine).
-            model._pt_fallback_path = str(weights)
+            # 640 engine, LIVE_IMGSZ=512 on a 640 engine). The .pt lives
+            # in the repo root by default (notebook downloads it there),
+            # so accept the file from either src/ or root - anything to
+            # avoid the mid-tick 113 MB Ultralytics auto-download.
+            _pt = str(weights)
+            if not _os.path.isfile(_pt):
+                from pathlib import Path as _Path
+                _bare = _Path(_pt).name
+                for _c in (_Path(__file__).resolve().parent.parent / _bare,
+                           _Path(__file__).resolve().parent.parent.parent
+                             / _bare):
+                    if _c.is_file():
+                        _pt = str(_c)
+                        break
+            if _os.path.isfile(_pt):
+                model._pt_fallback_path = _pt
+                print(f"detect: OpenVINO engine loaded ({_ov_dir}) - "
+                      f"torch fallback ready at {_pt}")
+            else:
+                print(f"detect: OpenVINO engine loaded ({_ov_dir}) - "
+                      f"torch fallback disabled (no .pt on disk; "
+                      f"non-native imgsz will raise instead of downloading)")
             print(f"detect: OpenVINO engine loaded ({_ov_dir}) - "
                   f"adapter overlay skipped (torch-only)")
             return model
@@ -294,11 +330,15 @@ def load_model(weights: str = "yolov8s.pt"):
     return model
 
 
-# yt-dlp's default (web) client started returning "the page needs to be
-# reloaded" on live streams in 2026; the android innertube client dodges it
-# and hands back a plain googlevideo HLS manifest. Kept configurable so a
-# future client break is a one-line change, not a redeploy.
-_YT_PLAYER_CLIENTS = (os.environ.get("YT_PLAYER_CLIENTS") or "android,ios,tv").split(",")
+# yt-dlp innertube clients tried in order until one hands back a real HLS
+# manifest. YouTube retires/breaks specific clients on a rolling schedule
+# so the list is kept broad on purpose - the try loop stops at the first
+# success. Auth-cookie-friendly clients FIRST so a session with a cookies
+# file wins on its first attempt; legacy anonymous clients at the tail.
+_YT_PLAYER_CLIENTS = (
+    os.environ.get("YT_PLAYER_CLIENTS")
+    or "web,web_safari,android_producer,ios_music,default,android,ios,tv"
+).split(",")
 
 # PO-token provider (2026-07-29): YouTube starves Google-datacenter IPs -
 # streams resolve, but googlevideo serves them no data ("opened but
@@ -312,13 +352,10 @@ _YT_PLAYER_CLIENTS = (os.environ.get("YT_PLAYER_CLIENTS") or "android,ios,tv").s
 # deploy/gcp-vm/setup_pot_provider.sh).
 _YT_POT_SCRIPT = (os.environ.get("YT_POT_SCRIPT") or "").strip()
 
-# Authenticated-session cookies (YT_COOKIES_FILE, 2026-07-30): the last
-# free lever against the datacenter starvation, and the one YouTube's own
-# bot-check message points at ("Use --cookies-from-browser or --cookies").
-# A Netscape-format cookies.txt exported from a logged-in browser session;
-# the operator uploads it to the VM and points this env var at it. When
-# the var is unset or the file is missing, resolution behaves exactly as
-# before - every deployment without cookies keeps working unchanged.
+# Authenticated-session cookies (YT_COOKIES_FILE): the last free lever
+# against the YouTube bot-check ("Sign in to confirm you're not a bot").
+# A Netscape-format cookies.txt exported from a logged-in browser session.
+# When the var is unset or the file is missing, yt-dlp is anonymous.
 _YT_COOKIES_FILE = (os.environ.get("YT_COOKIES_FILE") or "").strip()
 
 
@@ -330,13 +367,17 @@ def _yt_extractor_args(client: str) -> dict:
 
 
 def _yt_opts(client: str) -> dict:
-    """yt-dlp options for one resolution attempt. Split out so tests pin
-    the exact shape (cookies attach only when the file really exists)."""
+    """yt-dlp options for one resolution attempt. Cookies attach only
+    when the env-referenced file really exists; every call re-reads the
+    env so a notebook that sets YT_COOKIES_FILE after import picks it up
+    on the very next resolve."""
     opts = {"quiet": True, "no_warnings": True,
             "format": "best[protocol^=m3u8]/best",
             "extractor_args": _yt_extractor_args(client)}
-    if _YT_COOKIES_FILE and os.path.isfile(_YT_COOKIES_FILE):
-        opts["cookiefile"] = _YT_COOKIES_FILE
+    cookies = (os.environ.get("YT_COOKIES_FILE")
+               or _YT_COOKIES_FILE or "").strip()
+    if cookies and os.path.isfile(cookies):
+        opts["cookiefile"] = cookies
     return opts
 
 
@@ -507,11 +548,6 @@ def resolve_webcamera24(page_url: str) -> str:
     raise RuntimeError("webcamera24: no tvkur/YouTube player found on page")
 
 
-_SCREEN_CAPTURE_FALLBACK = (
-    os.environ.get("SCREEN_CAPTURE_FALLBACK") or "").strip().lower() in (
-        "1", "true", "yes", "on")
-
-
 def _resolve_uncached(cam: dict) -> str:
     kind = cam.get("kind", "hls")
     # Local uploaded files carry `path` instead of `url`; hand the path
@@ -522,30 +558,28 @@ def _resolve_uncached(cam: dict) -> str:
     if kind == "hls":
         return url
     if kind == "youtube":
-        try:
-            return resolve_youtube(url)
-        except Exception as e:
-            # yt-dlp is often blocked at the IP level on operator laptops
-            # (YouTube bot check ignores even a fresh cookies file - see
-            # AUDIT_REPORT.md section 7). When SCREEN_CAPTURE_FALLBACK=1
-            # the resolver hands back a sentinel URL that grab_frame
-            # recognises and captures from the operator's screen instead
-            # of the network. The operator keeps the browser open with
-            # the iframe player visible; ImageGrab handles the rest.
-            if _SCREEN_CAPTURE_FALLBACK:
-                from app.screen_capture import SCREEN_CAPTURE_SENTINEL
-                print(f"youtube resolve failed for {cam.get('id', url)}, "
-                      f"falling back to screen capture: {e}")
-                return SCREEN_CAPTURE_SENTINEL
-            raise
+        # With SCREEN_CAPTURE_FALLBACK=1 skip yt-dlp entirely and go straight
+        # to screen capture. yt-dlp sometimes succeeds on this machine and
+        # returns a manifest URL, but the googlevideo CDN then blocks the
+        # actual .ts segment fetch (30-second FFmpeg timeout) - so relying on
+        # yt-dlp gives an unusable stream. When the operator opted into the
+        # screen-capture fallback they've already accepted that the video is
+        # rendered by the visible iframe player; capturing that is more
+        # reliable than fighting the CDN.
+        if _SCREEN_CAPTURE_FALLBACK:
+            from app.screen_capture import SCREEN_CAPTURE_SENTINEL
+            return SCREEN_CAPTURE_SENTINEL
+        # Primary path: yt-dlp resolves the manifest URL directly. Without
+        # the fallback, a yt-dlp failure raises so the caller can honestly
+        # say the camera is unreachable and the operator can pick another.
+        return resolve_youtube(url)
     if kind == "skyline":
         return resolve_skyline(cam.get("page", url))
     if kind == "webcamera24":
         return resolve_webcamera24(cam.get("page", url))
     if kind == "screen":
-        # Explicit screen-capture camera. Register a `screen` camera in
-        # cameras.py with `url: "screen://primary"` and (optionally) a
-        # SCREEN_CAPTURE_BBOX env var to bound the capture region.
+        # Explicit screen-capture camera. Register in cameras.py with
+        # url: "screen://primary" and optionally an env-provided bbox.
         from app.screen_capture import SCREEN_CAPTURE_SENTINEL
         return SCREEN_CAPTURE_SENTINEL
     raise ValueError(f"unknown camera kind: {kind!r}")
@@ -829,18 +863,16 @@ def grab_frame(stream_url: str):
     """Open an HLS/RTSP stream, read a single frame (BGR ndarray), close. None on failure.
 
     For hosts that need referer/origin headers, route via _grab_via_segment.
-    The special sentinel `screen://primary` (set by resolve_uncached when
-    SCREEN_CAPTURE_FALLBACK=1 and yt-dlp is blocked) short-circuits to
-    the local screen grab.
+    For the screen-capture sentinel, grab pixels from the primary display.
     """
     if stream_url and stream_url.startswith("screen://"):
-        from app.screen_capture import capture, parse_bbox_env, get_region
-        if get_region() is None:
-            bbox = parse_bbox_env()
-            if bbox is not None:
-                from app.screen_capture import set_region
-                set_region(bbox)
-        return capture()
+        try:
+            from app.screen_capture import capture as _screen_capture
+            return _screen_capture()
+        except Exception as e:
+            if _LAST_GRAB_ERROR is None:
+                _note_grab_failure("screen capture", e)
+            return None
     for host, headers in HEADER_HOSTS.items():
         if host in stream_url:
             try:
@@ -1574,6 +1606,16 @@ def detect_with_boxes(model, frame, conf: float = 0.35,
                 ptp = getattr(model, "_pt_fallback_path", None)
                 if not ptp or "compatible" not in str(e):
                     raise
+                # Only fall back to torch when the .pt actually exists on
+                # disk. Passing a missing bare name to YOLO() triggers a
+                # ~113 MB Ultralytics auto-download mid-tick (silent, no
+                # network policy prompt) - re-raise the original OpenVINO
+                # error instead so the caller sees a clean failure.
+                if not os.path.isfile(ptp):
+                    print(f"detect: OpenVINO engine rejected "
+                          f"imgsz={kwargs.get('imgsz')} but torch fallback "
+                          f"({ptp}) is missing - re-raising")
+                    raise
                 fb = _TORCH_FALLBACK.get(ptp)
                 if fb is None:
                     from ultralytics import YOLO as _YOLO
@@ -1649,9 +1691,10 @@ def detect_with_boxes(model, frame, conf: float = 0.35,
                     break
 
     counts = {name: 0 for name in CLASSES_OF_INTEREST}
+    counts["animal"] = 0  # synthetic label from NAME_BY_ID (COCO ids 14-19)
     boxes: list[dict] = []
     for b in kept:
-        counts[b["cls"]] += 1
+        counts[b["cls"]] = counts.get(b["cls"], 0) + 1
         boxes.append({k: b[k] for k in ("x1", "y1", "x2", "y2", "cls", "conf")})
     counts["vehicles"] = sum(counts[v] for v in VEHICLE_NAMES)
     return counts, boxes

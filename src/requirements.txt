@@ -1,7 +1,7 @@
 # Core CV / detection
 ultralytics>=8.2.0          # YOLO26/v8 detection + pose
 opencv-python-headless>=4.9 # frame decoding (headless variant for servers)
-opencv-contrib-python>=4.9  # dnn_superres for FSRCNN 4x plate super-resolution
+opencv-contrib-python>=4.9  # dnn_superres for ESPCN 4x plate super-resolution
 
 # Live stream access
 yt-dlp>=2024.4.9            # resolves YouTube Live -> HLS (.m3u8) URLs
@@ -17,6 +17,9 @@ python-dateutil>=2.9
 # Reports (local PDF generation)
 reportlab>=4.0
 Pillow>=10.0
+
+# System telemetry (CPU / RAM live HUD above the video player)
+psutil>=5.9
 
 # --- Non-Latin plate OCR (2026-08-17: on by default) --------------------
 easyocr>=1.7          # Thai/Arabic/Japanese/Chinese plate OCR (~150 MB per lang)

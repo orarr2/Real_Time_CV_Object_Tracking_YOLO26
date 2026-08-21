@@ -40,10 +40,9 @@
     .tabbar button:hover { color: #e7e9ee; }
     main[data-active-tab="analysis"] > [data-tab]:not([data-tab="analysis"]),
     main[data-active-tab="investigation"] > [data-tab]:not([data-tab="investigation"]),
-    main[data-active-tab="rl"]       > [data-tab]:not([data-tab="rl"]) {
-      display: none !important;
+    main[data-active-tab="models"] > [data-tab]:not([data-tab="models"]) {
+        display: none !important;
     }
-
     /* Picker bar: dropdown of catalog cams + uploaded files, upload button,
        start button. Sits above the single tile. */
     #picker-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
@@ -175,10 +174,6 @@
     .anomaly-wrap h2 { margin: 0 0 10px; font-size: 16px; }
 
     /* Review panel: pick one saved detection, decide if the label is right. */
-    .review-wrap { background: #171a21; border: 1px solid #232733;
-                   border-radius: 12px; padding: 16px; margin-top: 16px; }
-    .review-wrap h2 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
-    .review-wrap .sub { color: #8b909a; font-size: 12px; margin-bottom: 12px; }
     .review-body { display: grid; gap: 16px;
                    grid-template-columns: minmax(220px, 320px) 1fr;
                    align-items: start; }
@@ -302,7 +297,7 @@
   <nav class="tabbar" id="tabbar">
     <button data-tab-btn="analysis" class="on">Analysis</button>
     <button data-tab-btn="investigation">Investigation</button>
-    <button data-tab-btn="rl">Reinforcement learning</button>
+    <button data-tab-btn="models">Model information</button>
   </nav>
 
   <main data-active-tab="analysis">
@@ -323,691 +318,31 @@
     <!-- Investigation tab: every saved detection sample with its full frame.
          Fed by /api/analysis/saved. -->
     <div class="anomaly-wrap" id="gallery-section" data-tab="investigation">
-      <h2 id="gallery-title">Detections gallery - saved samples per layer</h2>
-      <div class="sub">Every detection you saved from the live strip, plus
-        the automatic proof samples - full frame, layer, camera and time.
-        Click an image for the original.</div>
-      <div id="gallery-wrap" style="display:grid;gap:10px;margin-top:10px;
-           grid-template-columns:repeat(auto-fill, minmax(210px, 1fr))"></div>
+      <div style="display:flex;align-items:flex-start;
+           justify-content:space-between;gap:12px;margin-bottom:12px">
+        <div style="flex:1;min-width:0">
+          <h2 id="gallery-title" style="margin:0">Detections gallery -
+            saved samples per layer</h2>
+          <div class="sub" style="margin-top:4px">Every detection you saved
+            from the live strip, plus the automatic proof samples - full
+            frame, layer, camera and time. Click an image for the original.</div>
+        </div>
+        <button id="gallery-clear" style="flex-shrink:0;background:#7f1d1d;
+             color:#fecaca;border:1px solid #991b1b;border-radius:6px;
+             padding:6px 12px;cursor:pointer;font-size:12px;
+             align-self:center">Clear all</button>
+      </div>
+      <div id="gallery-wrap" style="display:grid;gap:10px;
+           grid-template-columns:repeat(auto-fill, minmax(170px, 1fr))"></div>
     </div>
 
-    <!-- Frame-based review UI. Canvas shows the whole frame with every
-         detection overlaid; user clicks each box to verdict it, and can
-         draw NEW boxes for objects the model missed. -->
-    <div class="review-wrap" id="review-section" data-tab="rl">
-      <h2>Review detections - teach the system what it got wrong</h2>
-      <div class="sub">Full frame with all detections overlaid. Click a
-        box to cycle its verdict (grey then green correct then red wrong then grey),
-        or use <b>relabel</b> to fix a wrong class. Click "Add missing" and
-        drag on the canvas to mark an object the model failed to see. Every
-        verdict goes to <code>data/reviews.json</code>, hot-reloads the
-        analyzer's per-camera confidence within a few minutes, and feeds the
-        training exporter (<code>tools/export_labels.py</code>). The strip
-        below is a paced queue: the 5 frames the model is LEAST sure about,
-        then the next 5 when you finish, with a breather after 30.
-        Reviewed thumbnails re-open for amending.</div>
-      <div class="frame-strip" id="frame-strip" hidden></div>
-      <div class="review-frame-body">
-        <div class="canvas-wrap">
-          <div class="canvas-empty" id="canvas-empty">loading...</div>
-          <canvas id="review-canvas" width="800" height="450" hidden></canvas>
-          <div class="canvas-hint" id="canvas-hint"></div>
-        </div>
-        <div class="review-panel">
-          <div class="frame-meta">
-            <span class="frame-cam" id="frame-cam">-</span>
-            <span class="frame-path" id="frame-path"></span>
-          </div>
-          <div class="frame-boxes-summary" id="frame-boxes-summary">
-            <span class="fbs-box"><span class="dot" style="background:#8b909a"></span>
-              <b id="fbs-untouched">0</b> untouched</span>
-            <span class="fbs-box"><span class="dot" style="background:#36d399"></span>
-              <b id="fbs-correct">0</b> correct</span>
-            <span class="fbs-box"><span class="dot" style="background:#ef4444"></span>
-              <b id="fbs-wrong">0</b> wrong</span>
-            <span class="fbs-box"><span class="dot" style="background:#f0a35e"></span>
-              <b id="fbs-relabel">0</b> relabeled</span>
-            <span class="fbs-box"><span class="dot" style="background:#c084fc"></span>
-              <b id="fbs-object">0</b> object</span>
-            <span class="fbs-box"><span class="dot" style="background:#4f8cff"></span>
-              <b id="fbs-missed">0</b> missed</span>
-          </div>
-          <div class="frame-controls">
-            <button id="mode-verdict" class="mode-btn on">verdict mode</button>
-            <button id="mode-add" class="mode-btn">+ add missing</button>
-            <button id="mode-block" class="mode-btn"
-                    title="drag a box on the canvas to permanently blacklist this area for the class picked below">+ block area</button>
-            <button id="mode-relabel" class="mode-btn"
-                    title="click a box to change its class to the one picked below">relabel</button>
-            <select id="add-cls">
-              <option value="person">person</option>
-              <option value="car">car</option>
-              <option value="truck">truck</option>
-              <option value="bus">bus</option>
-              <option value="motorcycle">motorcycle</option>
-              <option value="bicycle">bicycle</option>
-              <option value="train">train</option>
-            </select>
-          </div>
-          <div class="review-note-wrap" id="note-wrap">
-            <textarea id="review-note" rows="2"
-                      placeholder="optional note about this frame"></textarea>
-          </div>
-          <div class="btn-row">
-            <button id="frame-save">save + next frame</button>
-            <button class="next" id="frame-skip">skip</button>
-            <button class="next" id="frame-undo" title="re-open the frame you just saved" disabled>undo last</button>
-          </div>
-          <div class="review-status" id="review-status"></div>
-          <div class="review-stats" id="review-stats">reviewed 0</div>
-          <div class="disk-usage" id="frames-usage" hidden>
-            <span>review frames on disk:</span>
-            <span><b id="frames-mb">0</b> MB - <b id="frames-count">0</b> /
-                  <span id="frames-cap">100</span> frames
-                  (every <span id="frames-every">5</span> bursts)</span>
-            <div class="bar" id="frames-bar"><i style="width:0%"></i></div>
-            <button id="frames-clear" title="delete stored review frames">clear all</button>
-          </div>
-          <div class="disk-usage" id="disk-usage" hidden>
-            <span>anomaly crops on disk:</span>
-            <span><b id="disk-used">0</b> / <span id="disk-cap">300</span> MB
-                  - <b id="disk-count">0</b> files</span>
-            <div class="bar" id="disk-bar"><i style="width:0%"></i></div>
-            <button id="disk-clear" title="delete every extracted crop from the disk cache">clear all</button>
-          </div>
-          <div class="disk-usage" id="live-usage" hidden>
-            <span>live samples pool:</span>
-            <span><b id="live-count">0</b> / <span id="live-cap">200</span> crops
-                  (~<b id="live-mb">0</b> MB - every <span id="live-every">5</span> bursts)</span>
-            <div class="bar" id="live-bar"><i style="width:0%"></i></div>
-            <button id="live-clear" title="delete the live-sample pool from disk">clear all</button>
-          </div>
-        </div>
-      </div>
-    </div>
+    <!-- Model information tab: mounted by app.js when the tab is opened. -->
+    <div id="models-section" data-tab="models"></div>
 
   </main>
 
   <!-- ?v=N is a cache-buster: bump it whenever any JS file changes. -->
   <script src="./app.js?v=1"></script>
-
-  <!-- Frame-based review UI. Canvas renders the whole frame with every
-       detection overlaid; user clicks each box to cycle its verdict,
-       relabels it to a different class, or switches into "add missing"
-       mode to drag out a new box for an object the model didn't detect. -->
-  <script>
-  (function initFrameReview() {
-    const $ = (id) => document.getElementById(id);
-    const canvas = $("review-canvas"), emptyEl = $("canvas-empty");
-    const hintEl = $("canvas-hint");
-    const camEl = $("frame-cam"), pathEl = $("frame-path");
-    const modeVerdictBtn = $("mode-verdict"), modeAddBtn = $("mode-add");
-    const addClsSel = $("add-cls");
-    const saveBtn = $("frame-save"), skipBtn = $("frame-skip"),
-          undoBtn = $("frame-undo");
-    let lastSavedPath = null;
-    const noteEl = $("review-note");
-    const statusEl = $("review-status"), statsEl = $("review-stats");
-    const framesWrap = $("frames-usage"), framesMb = $("frames-mb"),
-          framesCount = $("frames-count"), framesCap = $("frames-cap"),
-          framesEvery = $("frames-every"), framesBar = $("frames-bar"),
-          framesClearBtn = $("frames-clear");
-    const diskWrap = $("disk-usage"), diskUsed = $("disk-used"),
-          diskCap = $("disk-cap"), diskCount = $("disk-count"),
-          diskBar = $("disk-bar"), diskClearBtn = $("disk-clear");
-    const liveWrap = $("live-usage"), liveCount = $("live-count"),
-          liveCap = $("live-cap"), liveMb = $("live-mb"),
-          liveEvery = $("live-every"), liveBar = $("live-bar"),
-          liveClearBtn = $("live-clear");
-    const fbsU = $("fbs-untouched"), fbsC = $("fbs-correct"),
-          fbsW = $("fbs-wrong"), fbsM = $("fbs-missed"),
-          fbsR = $("fbs-relabel"), fbsO = $("fbs-object");
-    const stripEl = $("frame-strip");
-    if (!canvas) return;
-
-    const ctx = canvas.getContext("2d");
-
-    let current = null;
-    let img = null;
-    let boxVerdicts = {};
-    let missedBoxes = [];
-    let mode = "verdict";
-    let drag = null;
-    let scale = 1;
-
-    const clsColor = {
-      person: "#36d399", car: "#4f8cff", truck: "#f0a35e",
-      bus: "#f0a35e", motorcycle: "#ff9de0", bicycle: "#ff9de0",
-      train: "#c464ff",
-    };
-
-    const modeBlockBtn = $("mode-block");
-    const modeRelabelBtn = $("mode-relabel");
-    function setMode(m) {
-      mode = m;
-      modeVerdictBtn.classList.toggle("on", m === "verdict");
-      modeAddBtn.classList.toggle("on", m === "add");
-      if (modeBlockBtn) modeBlockBtn.classList.toggle("on", m === "block");
-      if (modeRelabelBtn) modeRelabelBtn.classList.toggle("on", m === "relabel");
-      hintEl.textContent =
-          m === "verdict" ? "click a box: grey then correct then wrong then grey"
-        : m === "add"     ? "drag on the canvas to draw a box around the missed object"
-        : m === "relabel" ? "click a box to set its class to the one picked in the dropdown (click again to undo)"
-        :                   "drag a box over a spot where the model keeps mis-firing this class";
-      canvas.style.cursor = (m === "verdict" || m === "relabel")
-          ? "pointer" : "crosshair";
-    }
-    modeVerdictBtn.addEventListener("click", () => setMode("verdict"));
-    modeAddBtn.addEventListener("click", () => setMode("add"));
-    if (modeBlockBtn) modeBlockBtn.addEventListener("click", () => setMode("block"));
-    if (modeRelabelBtn) modeRelabelBtn.addEventListener("click", () => setMode("relabel"));
-
-    function verdictColor(v) {
-      if (v && v.startsWith("relabel:")) return "#f0a35e";
-      if (v === "object") return "#c084fc";
-      return v === "correct" ? "#36d399" : v === "wrong" ? "#ef4444" : "#8b909a";
-    }
-
-    function renderSummary() {
-      if (!current) { fbsU.textContent = fbsC.textContent =
-          fbsW.textContent = fbsM.textContent = "0"; return; }
-      const boxes = current.boxes || [];
-      let c = 0, w = 0, rl = 0, ob = 0;
-      for (const b of boxes) {
-        const v = boxVerdicts[String(b.id)];
-        if (v === "correct") c++;
-        else if (v === "wrong") w++;
-        else if (v === "object") ob++;
-        else if (v && v.startsWith("relabel:")) rl++;
-      }
-      fbsC.textContent = c;
-      fbsW.textContent = w;
-      if (fbsO) fbsO.textContent = ob;
-      if (fbsR) fbsR.textContent = rl;
-      fbsU.textContent = boxes.length - c - w - rl - ob;
-      fbsM.textContent = missedBoxes.length;
-    }
-
-    function draw() {
-      if (!img || !current) return;
-      const targetW = Math.min(800, canvas.parentElement.clientWidth - 2);
-      const naturalW = current.frame_w || img.naturalWidth;
-      const naturalH = current.frame_h || img.naturalHeight;
-      scale = targetW / naturalW;
-      canvas.width = targetW;
-      canvas.height = Math.round(naturalH * scale);
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-      for (const b of current.boxes || []) {
-        const [x1, y1, x2, y2] = b.box;
-        const v = boxVerdicts[String(b.id)];
-        const col = v ? verdictColor(v) : (clsColor[b.cls] || "#e7e9ee");
-        ctx.lineWidth = v === "wrong" || v === "correct" || v === "object" ? 3 : 2;
-        ctx.strokeStyle = col;
-        ctx.strokeRect(x1 * scale, y1 * scale,
-                       (x2 - x1) * scale, (y2 - y1) * scale);
-        const tag = !v ? ""
-                  : v.startsWith("relabel:") ? ` [-> ${v.split(":")[1]}]`
-                  : ` [${v}]`;
-        const label = `${b.cls} ${(b.conf * 100).toFixed(0)}%${tag}`;
-        ctx.font = "12px system-ui, sans-serif";
-        const tm = ctx.measureText(label);
-        const lx = x1 * scale, ly = Math.max(14, y1 * scale - 2);
-        ctx.fillStyle = col;
-        ctx.fillRect(lx, ly - 12, tm.width + 6, 14);
-        ctx.fillStyle = "#0c0e13";
-        ctx.fillText(label, lx + 3, ly - 1);
-      }
-
-      for (const m of missedBoxes) {
-        const [x1, y1, x2, y2] = m.box;
-        ctx.setLineDash([6, 3]);
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = "#4f8cff";
-        ctx.strokeRect(x1 * scale, y1 * scale,
-                       (x2 - x1) * scale, (y2 - y1) * scale);
-        ctx.setLineDash([]);
-        const label = `missed ${m.cls}`;
-        ctx.font = "12px system-ui, sans-serif";
-        const tm = ctx.measureText(label);
-        ctx.fillStyle = "#4f8cff";
-        ctx.fillRect(x1 * scale, y1 * scale - 12, tm.width + 6, 14);
-        ctx.fillStyle = "#0c0e13";
-        ctx.fillText(label, x1 * scale + 3, y1 * scale - 1);
-      }
-
-      if (drag) {
-        ctx.setLineDash([4, 4]);
-        ctx.lineWidth = 2; ctx.strokeStyle = "#4f8cff";
-        const dx = Math.min(drag.x0, drag.x1),
-              dy = Math.min(drag.y0, drag.y1),
-              dw = Math.abs(drag.x1 - drag.x0),
-              dh = Math.abs(drag.y1 - drag.y0);
-        ctx.strokeRect(dx, dy, dw, dh);
-        ctx.setLineDash([]);
-      }
-
-      renderSummary();
-    }
-
-    function eventCoords(e) {
-      const rect = canvas.getBoundingClientRect();
-      const x = (e.clientX - rect.left) * (canvas.width / rect.width);
-      const y = (e.clientY - rect.top) * (canvas.height / rect.height);
-      return { x, y };
-    }
-
-    function findBoxAt(cx, cy) {
-      let best = null;
-      let bestArea = Infinity;
-      for (const b of current.boxes || []) {
-        const [x1, y1, x2, y2] = b.box;
-        const cx1 = x1 * scale, cy1 = y1 * scale;
-        const cx2 = x2 * scale, cy2 = y2 * scale;
-        if (cx >= cx1 && cx <= cx2 && cy >= cy1 && cy <= cy2) {
-          const area = (cx2 - cx1) * (cy2 - cy1);
-          if (area < bestArea) { best = b; bestArea = area; }
-        }
-      }
-      return best;
-    }
-
-    canvas.addEventListener("click", (e) => {
-      if ((mode !== "verdict" && mode !== "relabel") || !current) return;
-      const { x, y } = eventCoords(e);
-      const b = findBoxAt(x, y);
-      if (!b) return;
-      const key = String(b.id);
-      const cur = boxVerdicts[key];
-      if (mode === "relabel") {
-        const target = `relabel:${addClsSel.value}`;
-        if (cur === target) delete boxVerdicts[key];
-        else boxVerdicts[key] = target;
-        draw();
-        return;
-      }
-      const next = (cur === undefined || cur.startsWith("relabel:")) ? "correct"
-                 : cur === "correct" ? "wrong"
-                 : cur === "wrong" ? "object" : undefined;
-      if (next) boxVerdicts[key] = next;
-      else delete boxVerdicts[key];
-      draw();
-    });
-
-    canvas.addEventListener("mousedown", (e) => {
-      if ((mode !== "add" && mode !== "block") || !current) return;
-      const { x, y } = eventCoords(e);
-      drag = { x0: x, y0: y, x1: x, y1: y };
-    });
-    canvas.addEventListener("mousemove", (e) => {
-      if (!drag) return;
-      const { x, y } = eventCoords(e);
-      drag.x1 = x; drag.y1 = y;
-      draw();
-    });
-    canvas.addEventListener("mouseup", async (e) => {
-      if (!drag) return;
-      const { x, y } = eventCoords(e);
-      drag.x1 = x; drag.y1 = y;
-      const dw = Math.abs(drag.x1 - drag.x0),
-            dh = Math.abs(drag.y1 - drag.y0);
-      if (dw > 6 && dh > 6) {
-        const x1 = Math.min(drag.x0, drag.x1) / scale;
-        const y1 = Math.min(drag.y0, drag.y1) / scale;
-        const x2 = Math.max(drag.x0, drag.x1) / scale;
-        const y2 = Math.max(drag.y0, drag.y1) / scale;
-        if (mode === "add") {
-          missedBoxes.push({ cls: addClsSel.value, box: [x1, y1, x2, y2] });
-        } else if (mode === "block") {
-          const nw = current.frame_w || 1, nh = current.frame_h || 1;
-          const nx1 = Math.max(0, Math.min(1, x1 / nw));
-          const ny1 = Math.max(0, Math.min(1, y1 / nh));
-          const nx2 = Math.max(0, Math.min(1, x2 / nw));
-          const ny2 = Math.max(0, Math.min(1, y2 / nh));
-          const polygon = [[nx1, ny1], [nx2, ny1], [nx2, ny2], [nx1, ny2]];
-          try {
-            const r = await fetch("/api/blacklist-add", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                cam_id: current.cam_id, cls: addClsSel.value, polygon,
-                reason: "user-marked from Review canvas",
-              }),
-            });
-            const data = await r.json();
-            if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
-            statusEl.className = "review-status";
-            statusEl.textContent = data.created
-                ? `blocked: ${addClsSel.value} in this area of ${current.cam_id} will be ignored from now on`
-                : `already blocked: ${addClsSel.value} in this area of ${current.cam_id}`;
-          } catch (err) {
-            statusEl.className = "review-status err";
-            statusEl.textContent = `block failed: ${err.message}`;
-          }
-        }
-      }
-      drag = null;
-      draw();
-    });
-    canvas.addEventListener("mouseleave", () => { drag = null; draw(); });
-
-    function _resetEditor() {
-      statusEl.className = "review-status"; statusEl.textContent = "";
-      canvas.hidden = true;
-      emptyEl.textContent = "loading..."; emptyEl.style.display = "";
-      current = null; img = null;
-      boxVerdicts = {}; missedBoxes = []; drag = null;
-      noteEl.value = "";
-    }
-
-    function _showFrame(data) {
-      current = data;
-      camEl.textContent = data.cam_id || "-";
-      pathEl.textContent = data.frame_path;
-      if (data.existing) {
-        boxVerdicts = { ...(data.existing.box_verdicts || {}) };
-        missedBoxes = (data.existing.missed_detections || []).map(
-            (m) => ({ cls: m.cls, box: m.box.slice() }));
-        noteEl.value = data.existing.note || "";
-        statusEl.className = "review-status";
-        statusEl.textContent = "editing a previously-reviewed frame - saving overwrites the old verdicts";
-      }
-      markStripCurrent(data.frame_path);
-      img = new Image();
-      img.onload = () => {
-        emptyEl.style.display = "none";
-        canvas.hidden = false;
-        draw();
-      };
-      img.onerror = () => {
-        emptyEl.textContent = "frame image failed to load";
-      };
-      img.src = data.url;
-    }
-
-    async function loadNext() {
-      _resetEditor();
-      try {
-        const r = await fetch("/api/review-frame?scope=local",
-                              { cache: "no-store" });
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
-        if (data.done) {
-          camEl.textContent = "-"; pathEl.textContent = "";
-          markStripCurrent(null);
-          try {
-            const rr = await fetch("/api/review-frames-stats");
-            const s = rr.ok ? await rr.json() : null;
-            emptyEl.innerHTML = (s && s.count === 0)
-                ? "no frames in the pool yet.<br>" +
-                  "<span style=\"font-size:11px\">the analyzer saves one " +
-                  "frame every " + (s.every_n || 5) + " bursts to " +
-                  "<code>review_frames/</code></span>"
-                : "every stored frame has been reviewed.<br>" +
-                  "<span style=\"font-size:11px\">click a thumbnail above " +
-                  "to re-open one and amend its verdicts</span>";
-          } catch (_) {
-            emptyEl.textContent = "no frames available.";
-          }
-          renderSummary();
-          return;
-        }
-        _showFrame(data);
-      } catch (err) {
-        statusEl.className = "review-status err";
-        statusEl.textContent = `frame load failed: ${err.message}`;
-        emptyEl.textContent = "load failed";
-      }
-    }
-
-    async function loadSpecific(rel) {
-      _resetEditor();
-      try {
-        const r = await fetch(
-            `/api/review-frame?path=${encodeURIComponent(rel)}`,
-            { cache: "no-store" });
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
-        _showFrame(data);
-      } catch (err) {
-        statusEl.className = "review-status err";
-        statusEl.textContent = `frame load failed: ${err.message}`;
-        emptyEl.textContent = "load failed";
-      }
-    }
-
-    function markStripCurrent(rel) {
-      if (!stripEl) return;
-      for (const el of stripEl.querySelectorAll(".fs-item")) {
-        el.classList.toggle("current", rel !== null && el.dataset.rel === rel);
-      }
-    }
-
-    const QUEUE_SIZE = 5;
-    const REVIEWED_TAIL = 5;
-    const SESSION_CAP = 30;
-    let sessionSaved = 0;
-    let restOverride = false;
-
-    async function loadStrip() {
-      if (!stripEl) return;
-      try {
-        const r = await fetch("/api/review-frames-list?scope=local", { cache: "no-store" });
-        if (!r.ok) return;
-        const data = await r.json();
-        const frames = data.frames || [];
-        const queue = frames.filter((f) => !f.reviewed)
-            .sort((a, b) => (b.uncertainty ?? 0) - (a.uncertainty ?? 0)
-                            || b.frame_path.localeCompare(a.frame_path))
-            .slice(0, QUEUE_SIZE);
-        const done = frames.filter((f) => f.reviewed)
-            .sort((a, b) => b.frame_path.localeCompare(a.frame_path))
-            .slice(0, REVIEWED_TAIL);
-        const show = [...queue, ...done];
-        stripEl.hidden = show.length === 0;
-        stripEl.innerHTML = "";
-        for (const f of show) {
-          const item = document.createElement("div");
-          item.className = "fs-item";
-          item.dataset.rel = f.frame_path;
-          item.title = f.reviewed
-              ? `${f.cam_id} - reviewed, click to amend`
-              : `${f.cam_id} - model uncertainty ` +
-                `${Math.round((f.uncertainty ?? 0) * 100)}% - up next`;
-          item.innerHTML =
-              `<img loading="lazy" src="${f.url}" alt="">` +
-              (f.reviewed ? '<span class="fs-done">v</span>' : "") +
-              `<span class="fs-cam">${f.cam_id}</span>`;
-          item.addEventListener("click", () => loadSpecific(f.frame_path));
-          stripEl.appendChild(item);
-        }
-        if (current) markStripCurrent(current.frame_path);
-      } catch (_) { /* strip is a convenience */ }
-    }
-
-    function showRestScreen() {
-      canvas.hidden = true;
-      camEl.textContent = "-"; pathEl.textContent = "";
-      markStripCurrent(null);
-      emptyEl.innerHTML =
-          `you tagged <b>${sessionSaved}</b> frames this sitting - that is a ` +
-          `full session's worth of teaching.<br>` +
-          `<span style="font-size:11px">the pool keeps refilling from the ` +
-          `cameras; come back later, or </span>` +
-          `<button id="rest-continue" style="font-size:11px">keep going</button>`;
-      emptyEl.style.display = "";
-      document.getElementById("rest-continue").addEventListener("click", () => {
-        restOverride = true;
-        loadNext();
-      });
-    }
-
-    async function submit() {
-      if (!current) return;
-      statusEl.className = "review-status";
-      statusEl.textContent = "saving...";
-      try {
-        const body = {
-          frame_path:        current.frame_path,
-          cam_id:            current.cam_id,
-          box_verdicts:      boxVerdicts,
-          missed_detections: missedBoxes,
-          note:              noteEl.value.trim() || null,
-        };
-        const r = await fetch("/api/review-frame-submit", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
-        lastSavedPath = current.frame_path;
-        undoBtn.disabled = false;
-        sessionSaved++;
-        await refreshStats();
-        await loadStrip();
-        if (sessionSaved >= SESSION_CAP && !restOverride) {
-          showRestScreen();
-          return;
-        }
-        await loadNext();
-        if (sessionSaved % QUEUE_SIZE === 0) {
-          statusEl.className = "review-status";
-          statusEl.textContent =
-              `batch of ${QUEUE_SIZE} done (${sessionSaved} this sitting) - ` +
-              `next ${QUEUE_SIZE} queued`;
-        }
-      } catch (err) {
-        statusEl.className = "review-status err";
-        statusEl.textContent = `save failed: ${err.message}`;
-      }
-    }
-    saveBtn.addEventListener("click", submit);
-    skipBtn.addEventListener("click", loadNext);
-    undoBtn.addEventListener("click", () => {
-      if (lastSavedPath) loadSpecific(lastSavedPath);
-    });
-
-    async function refreshStats() {
-      try {
-        const r = await fetch("/api/review-stats", { cache: "no-store" });
-        if (!r.ok) return;
-        const s = await r.json();
-        const boost = s.boost || {};
-        const tp = s.frame_tp || 0, fp = s.frame_fp || 0, fn = s.frame_fn || 0;
-        const line1 = `frames reviewed <b>${s.frames_reviewed || 0}</b> ` +
-            `(TP ${tp} - FP ${fp} - FN ${fn})`;
-        const line2 = (s.total_reviewed || 0) > 0
-            ? ` - legacy crop reviews: <b>${s.total_reviewed || 0}</b>` : "";
-        const line3 = boost.approved != null
-            ? ` - confidence tuned on <b>${boost.adjusted_cls || 0}</b> class(es)`
-            : "";
-        statsEl.innerHTML = line1 + line2 + line3;
-      } catch (_) { /* offline ok */ }
-    }
-
-    async function refreshDisk() {
-      try {
-        const r = await fetch("/api/review-frames-stats", { cache: "no-store" });
-        if (r.ok) {
-          const s = await r.json();
-          if (!s.error) {
-            framesWrap.hidden = false;
-            framesMb.textContent = (s.bytes / (1024 * 1024)).toFixed(1);
-            framesCount.textContent = s.count;
-            framesCap.textContent = s.cap_files;
-            framesEvery.textContent = s.every_n;
-            const pct = Math.max(0, Math.min(100, (s.count / s.cap_files) * 100));
-            framesBar.querySelector("i").style.width = pct + "%";
-            framesBar.classList.toggle("high", pct >= 60 && pct < 90);
-            framesBar.classList.toggle("full", pct >= 90);
-          }
-        }
-      } catch (_) { framesWrap.hidden = true; }
-      try {
-        const r = await fetch("/api/anomaly-crops-stats", { cache: "no-store" });
-        if (!r.ok) { diskWrap.hidden = true; }
-        else {
-          const s = await r.json();
-          if (s.error || s.cap_bytes == null) { diskWrap.hidden = true; }
-          else {
-            diskWrap.hidden = false;
-            diskUsed.textContent = (s.bytes / (1024 * 1024)).toFixed(1);
-            diskCap.textContent = s.cap_mb;
-            diskCount.textContent = s.count;
-            const pct = Math.max(0, Math.min(100, (s.bytes / s.cap_bytes) * 100));
-            diskBar.querySelector("i").style.width = pct + "%";
-            diskBar.classList.toggle("high", pct >= 60 && pct < 90);
-            diskBar.classList.toggle("full", pct >= 90);
-          }
-        }
-      } catch (_) { diskWrap.hidden = true; }
-      try {
-        const r = await fetch("/api/live-samples-stats", { cache: "no-store" });
-        if (!r.ok) { liveWrap.hidden = true; return; }
-        const s = await r.json();
-        if (s.error || s.cap_files == null) { liveWrap.hidden = true; return; }
-        liveWrap.hidden = false;
-        liveCount.textContent = s.count;
-        liveCap.textContent = s.cap_files;
-        liveMb.textContent = (s.bytes / (1024 * 1024)).toFixed(1);
-        liveEvery.textContent = s.every_n;
-        const pct = Math.max(0, Math.min(100, (s.count / s.cap_files) * 100));
-        liveBar.querySelector("i").style.width = pct + "%";
-        liveBar.classList.toggle("high", pct >= 60 && pct < 90);
-        liveBar.classList.toggle("full", pct >= 90);
-      } catch (_) { liveWrap.hidden = true; }
-    }
-
-    framesClearBtn.addEventListener("click", async () => {
-      if (!confirm("Delete every saved review frame?")) return;
-      try { await fetch("/api/review-frames-clear", { method: "POST" }); }
-      catch (_) {}
-      await refreshDisk(); await loadStrip(); await loadNext();
-    });
-    diskClearBtn.addEventListener("click", async () => {
-      if (!confirm("Delete every extracted anomaly crop?")) return;
-      try { await fetch("/api/anomaly-crops-clear", { method: "POST" }); }
-      catch (_) {}
-      await refreshDisk();
-    });
-    liveClearBtn.addEventListener("click", async () => {
-      if (!confirm("Delete every crop in the live-samples pool?")) return;
-      try { await fetch("/api/live-samples-clear", { method: "POST" }); }
-      catch (_) {}
-      await refreshDisk();
-    });
-
-    setMode("verdict");
-    refreshStats();
-    refreshDisk();
-    loadStrip();
-    loadNext();
-    setInterval(refreshDisk, 60000);
-    setInterval(loadStrip, 120000);
-    window.addEventListener("resize", () => { if (img && current) draw(); });
-  })();
-  </script>
-
-  <script>
-  // Model-quality header line - polled every 10 s from /api/model-metrics.
-  (function initModelMetrics() {
-    const el = document.getElementById("model-metrics-line");
-    if (!el) return;
-    async function refresh() {
-      try {
-        const r = await fetch("/api/model-metrics", { cache: "no-store" });
-        if (!r.ok) { el.classList.add("stale"); return; }
-        const data = await r.json();
-        el.classList.remove("stale");
-        el.textContent = data.header_line || "Model: -";
-      } catch (_) {
-        el.classList.add("stale");
-      }
-    }
-    refresh();
-    setInterval(refresh, 10000);
-  })();
-  </script>
 
   <script>
   (function initTabs() {
@@ -1019,6 +354,9 @@
       for (const b of btns) b.classList.toggle("on", b.dataset.tabBtn === tab);
       try { localStorage.setItem("dash-tab", tab); } catch (_) {}
       requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
+      if (tab === "models" && typeof window.renderModelsTab === "function") {
+        window.renderModelsTab();
+      }
     }
     for (const b of btns) {
       b.addEventListener("click", () => activate(b.dataset.tabBtn));
@@ -1026,6 +364,269 @@
     let saved = null;
     try { saved = localStorage.getItem("dash-tab"); } catch (_) {}
     if (saved && btns.some((b) => b.dataset.tabBtn === saved)) activate(saved);
+  })();
+  </script>
+
+  <!-- Model information tab renderer. Mounts on first tab open, pulls
+       /api/models/info once, builds a table of weights + inline-SVG bar
+       charts for reference mAP / plate OCR accuracy / super-res PSNR
+       and one live-latency card. No external chart library - the whole
+       widget is inline SVG so it works offline. -->
+  <script>
+  (function initModelsTab() {
+    // The Model Information tab is LIVE - it re-fetches every REFRESH_MS
+    // while the tab is visible so the operator sees fresh CPU/RAM/GPU
+    // and a re-measured latency band drift under load. The published
+    // reference-metrics bars (mAP, char accuracy, PSNR) are static by
+    // definition (they come from each model's own benchmark paper) and
+    // so don't move, but they get RE-RENDERED into the DOM each poll so
+    // an operator who edited the manifest and dropped a new weight into
+    // the pipeline sees it appear without a page refresh.
+    const REFRESH_MS = 4000;
+    let pollTimer = null;
+    let inflight = false;
+
+    async function fetchAndRender(silent) {
+      const root = document.getElementById("models-section");
+      if (!root) return;
+      // Only fetch while the Models tab is actually visible - polling
+      // in the background wastes cycles and CPU% samples.
+      const main = document.querySelector("main");
+      if (main && main.dataset.activeTab !== "models") return;
+      if (inflight) return;
+      inflight = true;
+      if (!silent && !root.dataset.loaded) {
+        root.innerHTML = `<div class="sub" style="padding:12px">
+          Loading model inventory ...</div>`;
+      }
+      let data;
+      try {
+        const r = await fetch("/api/models/info", { cache: "no-store" });
+        data = await r.json();
+        if (!r.ok || !data.ok) {
+          throw new Error(data && data.error || ("HTTP " + r.status));
+        }
+      } catch (e) {
+        inflight = false;
+        if (!root.dataset.loaded) {
+          root.innerHTML = `<div class="sub" style="padding:12px;color:#f87171">
+            Failed to load model info: ${e.message}</div>`;
+        }
+        return;
+      }
+      inflight = false;
+      root.dataset.loaded = "1";
+      renderPayload(root, data);
+    }
+
+    function renderPayload(root, data) {
+      const models = data.models || [];
+      const latency = data.latency || {};
+      const notes = data.notes || [];
+      const esc = (s) => String(s == null ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      // 1. Model cards table
+      const rows = models.map((m) => `
+        <tr>
+          <td style="padding:6px 10px;font-family:monospace">${esc(m.name)}</td>
+          <td style="padding:6px 10px;color:#94a3b8">${esc(m.role)}</td>
+          <td style="padding:6px 10px">${esc(m.purpose)}</td>
+          <td style="padding:6px 10px;text-align:right">${
+            m.present ? m.size_mb + " MB"
+                      : "<span style='color:#f87171'>missing</span>"}</td>
+          <td style="padding:6px 10px;color:#64748b;font-family:monospace;
+              font-size:11px">${esc(m.path || "-")}</td>
+        </tr>`).join("");
+      // 2. Reference metrics chart data - split by metric type so we
+      //    don't mix mAP with character-accuracy or PSNR on one axis.
+      const mAPRows = models
+        .filter((m) => m.reference && m.reference.mAP50 != null)
+        .map((m) => ({ name: m.name, v50: m.reference.mAP50,
+                       v5095: m.reference.mAP5095 || 0,
+                       dataset: m.reference.dataset || "" }));
+      const ocrRows = models
+        .filter((m) => m.reference && m.reference.char_acc != null)
+        .map((m) => ({ name: m.name, acc: m.reference.char_acc,
+                       dataset: m.reference.dataset || "" }));
+      const psnrRows = models
+        .filter((m) => m.reference && m.reference.psnr_db != null)
+        .map((m) => ({ name: m.name, psnr: m.reference.psnr_db,
+                       dataset: m.reference.dataset || "" }));
+
+      function barChart(title, rows, keyLabels, colorFn, maxVal, unit) {
+        if (!rows.length) return "";
+        const barH = 22, gap = 8, padTop = 30, padLeft = 210, padRight = 60;
+        const height = padTop + rows.length * keyLabels.length * (barH + gap) + 10;
+        const width  = 720;
+        const scale  = (v) => (width - padLeft - padRight) * (v / maxVal);
+        let svg = `<div style="margin:8px 0 4px;font-weight:600;color:#e2e8f0">
+          ${esc(title)}</div>`;
+        svg += `<svg xmlns="http://www.w3.org/2000/svg" width="${width}"
+             height="${height}" viewBox="0 0 ${width} ${height}"
+             style="background:#0b1220;border:1px solid #1e293b;
+             border-radius:8px;display:block;max-width:100%">`;
+        // x-axis ticks (0, 0.5, 1.0 or unit-scaled)
+        for (let i = 0; i <= 4; i++) {
+          const x = padLeft + (i / 4) * (width - padLeft - padRight);
+          svg += `<line x1="${x}" y1="${padTop - 4}"
+             x2="${x}" y2="${height - 4}" stroke="#1e293b" stroke-width="1"/>`;
+          svg += `<text x="${x}" y="${padTop - 8}" fill="#64748b"
+             font-size="10" text-anchor="middle">${
+            ((maxVal * i / 4).toFixed(unit === "PSNR" ? 0 : 2))}${
+              unit === "PSNR" ? " dB" : ""}</text>`;
+        }
+        rows.forEach((r, idx) => {
+          const baseY = padTop + idx * keyLabels.length * (barH + gap);
+          svg += `<text x="${padLeft - 8}" y="${baseY + barH * 0.7}"
+             fill="#cbd5e1" font-size="11" text-anchor="end"
+             font-family="monospace">${esc(r.name)}</text>`;
+          keyLabels.forEach((k, ki) => {
+            const v = r[k.key] || 0;
+            const w = scale(v);
+            const y = baseY + ki * (barH + gap);
+            svg += `<rect x="${padLeft}" y="${y}" width="${w}" height="${barH}"
+               fill="${colorFn(k.key)}" rx="3"/>`;
+            svg += `<text x="${padLeft + w + 6}" y="${y + barH * 0.7}"
+               fill="#e2e8f0" font-size="10">${
+                 (v.toFixed(unit === "PSNR" ? 1 : 3))}${
+                   unit === "PSNR" ? " dB" : ""} ${esc(k.label)}</text>`;
+          });
+        });
+        svg += `</svg>`;
+        return svg;
+      }
+
+      const mapChart = barChart(
+        "Reference detection accuracy (mAP@50 vs mAP@50-95)",
+        mAPRows, [
+          {key: "v50",   label: "mAP@50"},
+          {key: "v5095", label: "mAP@50-95"},
+        ],
+        (k) => k === "v50" ? "#4ade80" : "#60a5fa",
+        1.0, ""
+      );
+      const ocrChart = barChart(
+        "License-plate OCR reference character accuracy",
+        ocrRows, [{key: "acc", label: "char acc"}],
+        () => "#f0a35e", 1.0, ""
+      );
+      const psnrChart = barChart(
+        "Super-resolution PSNR on Set14 x4 (higher = sharper)",
+        psnrRows, [{key: "psnr", label: "PSNR"}],
+        () => "#c084fc", 35, "PSNR"
+      );
+
+      // 3. Live latency card
+      const latMs = latency.latency_ms_median;
+      const latCard = latMs
+        ? `<div style="background:#0b1220;border:1px solid #1e293b;
+                     border-radius:8px;padding:12px 14px">
+             <div style="font-weight:600;color:#e2e8f0;margin-bottom:6px">
+               Measured on this machine
+             </div>
+             <div style="display:grid;
+                  grid-template-columns:auto 1fr;column-gap:14px;
+                  row-gap:4px;font-size:13px">
+               <span style="color:#94a3b8">Backend</span>
+                 <b>${esc(latency.backend || "-")}
+                    (${esc(latency.device || "-")})</b>
+               <span style="color:#94a3b8">Primary model</span>
+                 <b>${esc(latency.model || "-")}</b>
+               <span style="color:#94a3b8">Latency (median of 5)</span>
+                 <b style="color:#fbbf24">${latMs} ms</b>
+               <span style="color:#94a3b8">Latency range</span>
+                 <b>${latency.latency_ms_min}-${latency.latency_ms_max} ms</b>
+               <span style="color:#94a3b8">Throughput</span>
+                 <b style="color:#4ade80">${latency.fps_from_median} FPS</b>
+             </div>
+           </div>`
+        : `<div style="color:#94a3b8;background:#0b1220;border:1px solid #1e293b;
+                     border-radius:8px;padding:12px 14px">
+             Live latency benchmark unavailable
+             ${latency.error ? "(" + esc(latency.error) + ")" : ""}.
+           </div>`;
+
+      const notesHtml = notes.map((n) =>
+        `<li style="margin:4px 0;color:#94a3b8;font-size:12px">${esc(n)}</li>`
+      ).join("");
+
+      root.innerHTML = `
+        <div style="display:flex;flex-direction:column;gap:16px">
+          <div>
+            <h2 style="margin:0 0 4px;color:#e2e8f0;font-size:17px">
+              Model information</h2>
+            <div class="sub">Every weight the pipeline can load, plus
+              published benchmarks on the model's native dataset and one
+              latency measurement on this machine's stack.</div>
+          </div>
+          <div style="overflow-x:auto;background:#0f172a;border:1px solid #1e293b;
+              border-radius:8px">
+            <table style="width:100%;border-collapse:collapse;font-size:13px;
+                color:#e2e8f0">
+              <thead style="background:#111827">
+                <tr style="text-align:left">
+                  <th style="padding:8px 10px">Weight</th>
+                  <th style="padding:8px 10px">Role</th>
+                  <th style="padding:8px 10px">Purpose</th>
+                  <th style="padding:8px 10px;text-align:right">Size</th>
+                  <th style="padding:8px 10px">Path</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+          ${latCard}
+          ${mapChart}
+          ${ocrChart}
+          ${psnrChart}
+          <ul style="margin:0;padding-left:20px">${notesHtml}</ul>
+          <div style="color:#64748b;font-size:11px;text-align:right">
+            auto-refresh every ${REFRESH_MS / 1000}s -
+            last updated ${new Date().toLocaleTimeString()}
+          </div>
+        </div>`;
+    }
+
+    function startPolling() {
+      if (pollTimer) return;
+      fetchAndRender(false);
+      pollTimer = setInterval(() => fetchAndRender(true), REFRESH_MS);
+    }
+    function stopPolling() {
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    }
+
+    // The tab-switch code calls window.renderModelsTab() on activate;
+    // we start the auto-refresh loop from there. When the operator
+    // switches away we stop polling (the internal isVisible guard
+    // above also short-circuits any in-flight tick).
+    window.renderModelsTab = startPolling;
+    // The Page Visibility API dispatches on document, not window - Firefox
+    // in particular will never fire this on window and the poll keeps
+    // running with the tab hidden.
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) stopPolling();
+      else {
+        const main = document.querySelector("main");
+        if (main && main.dataset.activeTab === "models") startPolling();
+      }
+    });
+
+    // Stop polling when the operator navigates to another tab.
+    document.addEventListener("click", (e) => {
+      const btn = e.target.closest && e.target.closest("[data-tab-btn]");
+      if (btn && btn.dataset.tabBtn !== "models") stopPolling();
+    });
+
+    // If user reloaded on the Models tab, start polling immediately.
+    try {
+      if (localStorage.getItem("dash-tab") === "models") {
+        startPolling();
+      }
+    } catch (_) {}
   })();
   </script>
 </body>

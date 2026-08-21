@@ -161,16 +161,46 @@ function escapeHtml(s) {
 function buildSingleTile(cam) {
   const host = document.getElementById("tile-single");
   if (!host) return null;
+  // Hide the standalone #picker-bar - its contents move into the tile
+  // header so the row reads: [cam name] [picker in middle] [Analyze / -/10 / OK]
+  const oldPicker = document.getElementById("picker-bar");
+  if (oldPicker) oldPicker.style.display = "none";
   host.innerHTML = `
-    <div class="tile-head">
-      <div class="tile-head-left">
-        <h2 data-cam-name>${escapeHtml(cam.name || cam.id)}</h2>
-        <div class="city" data-cam-area>${escapeHtml(cam.area || cam.kind || "")}</div>
+    <div class="tile-head" style="display:flex;align-items:center;
+         gap:16px;flex-wrap:wrap">
+      <div class="tile-head-left" style="flex-shrink:0;min-width:180px">
+        <h2 data-cam-name style="margin:0">${escapeHtml(cam.name || cam.id)}</h2>
+        <div class="city" data-cam-area style="color:#94a3b8;font-size:12px">
+          ${escapeHtml(cam.area || cam.kind || "")}</div>
       </div>
-      <div class="tile-head-right">
+      <div class="tile-head-picker" style="flex:1;display:flex;
+           align-items:center;gap:8px;flex-wrap:wrap;justify-content:center;
+           min-width:0">
+        <label for="cam-picker-inline" class="sub" style="flex-shrink:0;
+             color:#94a3b8;font-size:12px">Camera:</label>
+        <select id="cam-picker-inline" data-cam-picker-inline
+                style="background:#0c0e13;color:#e7e9ee;
+                border:1px solid #2c3140;border-radius:6px;padding:6px 10px;
+                font-size:13px;flex:1;min-width:200px;max-width:420px">
+          <option>loading...</option>
+        </select>
+        <button data-upload-inline title="upload a local MP4/MKV file"
+                style="background:#1e293b;color:#e2e8f0;border:1px solid #334155;
+                border-radius:6px;padding:6px 12px;font-size:13px;cursor:pointer;
+                flex-shrink:0">Upload</button>
+        <button data-start-inline title="load the picked camera"
+                style="background:#2563eb;color:#fff;border:1px solid #2563eb;
+                border-radius:6px;padding:6px 14px;font-size:13px;cursor:pointer;
+                flex-shrink:0">Start</button>
+      </div>
+      <div class="tile-head-right" style="flex-shrink:0;display:flex;
+           align-items:center;gap:8px">
         <button class="analyze-btn" data-analyze
                 title="Live advanced analysis - pick one layer"
                 style="cursor:pointer;border:1px solid #334155;background:#1e293b;color:#e2e8f0;border-radius:6px;padding:2px 8px;font-size:13px">Analyze</button>
+        <button class="cinema-btn" data-cinema
+                title="Cinema mode - hide UI, video fills the tab, plate crops strip at bottom"
+                style="cursor:pointer;border:1px solid #334155;background:#1e293b;color:#e2e8f0;border-radius:6px;padding:2px 8px;font-size:13px">Cinema</button>
         <span class="activity-badge act-unknown" data-activity>
           <span class="dot"></span><span data-activity-text>-/10</span>
         </span>
@@ -189,6 +219,49 @@ function buildSingleTile(cam) {
       </div>
     </div>
   `;
+  // Mirror the inline picker to the same options as the (now hidden)
+  // top-of-page picker so clicking Start in the header does the same
+  // thing as the old picker bar. Wire the three inline controls to the
+  // existing handlers on the standalone elements.
+  const inlineSel = host.querySelector("[data-cam-picker-inline]");
+  const origSel = document.getElementById("cam-picker");
+  if (inlineSel && origSel) {
+    // Mirror the current options once, then keep in sync: /api/cameras
+    // is async and can resolve AFTER buildSingleTile runs, so the plain
+    // one-shot snapshot leaves the inline picker frozen on "loading...".
+    // A MutationObserver on the origin picker re-mirrors options + value
+    // every time the top-of-page picker is repopulated.
+    const _mirror = () => {
+      const keep = inlineSel.value;
+      inlineSel.innerHTML = origSel.innerHTML;
+      // Preserve the operator's current selection when the mirror rewrites
+      // the option list, else fall through to whatever origSel currently
+      // has selected.
+      const hasKeep = keep && Array.from(inlineSel.options)
+                                 .some((o) => o.value === keep);
+      inlineSel.value = hasKeep ? keep : origSel.value;
+    };
+    _mirror();
+    try {
+      const _obs = new MutationObserver(_mirror);
+      _obs.observe(origSel, { childList: true });
+      inlineSel._pickerObs = _obs;
+    } catch (_e) { /* older browsers - one-shot snapshot is the fallback */ }
+    inlineSel.addEventListener("change", () => {
+      origSel.value = inlineSel.value;
+      origSel.dispatchEvent(new Event("change", {bubbles: true}));
+    });
+  }
+  const inlineUpload = host.querySelector("[data-upload-inline]");
+  const origUpload = document.getElementById("upload-btn");
+  if (inlineUpload && origUpload) {
+    inlineUpload.addEventListener("click", () => origUpload.click());
+  }
+  const inlineStart = host.querySelector("[data-start-inline]");
+  const origStart = document.getElementById("start-cam");
+  if (inlineStart && origStart) {
+    inlineStart.addEventListener("click", () => origStart.click());
+  }
   const st = {
     slot: { slot_id: cam.id, placeholder_name: cam.name || cam.id,
             display_area: cam.area || "" },
@@ -212,9 +285,271 @@ function buildSingleTile(cam) {
   tileState[cam.id] = st;
   host.querySelector("[data-analyze]").addEventListener("click",
     () => openAnalysisPicker(st));
+  const cinemaBtn = host.querySelector("[data-cinema]");
+  if (cinemaBtn) cinemaBtn.addEventListener("click", () => toggleCinemaMode(st));
   buildVideoInto(st, cam);
   return st;
 }
+
+// ---------- Cinema mode + saved plate crops strip -----------------------
+// Operator ask 2026-08-20: LPR needs bigger pixels than the default tile
+// gives (~800px wide video → 20-40px plates → OCR borderline). Cinema mode
+// stretches the video to the whole tab so YouTube's iframe renders at
+// 1600-1920px wide, tripling the plate pixels. The canvas overlay stays
+// drawn on top of the video (unlike YouTube's own fullscreen which nukes
+// it), and a horizontal strip of the most recent saved plate crops is
+// pinned at the bottom so the operator sees the LPR extract land in real
+// time without leaving Cinema.
+(function installCinemaMode() {
+  const style = document.createElement("style");
+  style.textContent = `
+    body.cinema-active > header,
+    body.cinema-active > nav.tabbar,
+    body.cinema-active .tile-head,
+    body.cinema-active #picker-bar,
+    body.cinema-active [data-tab="investigation"],
+    body.cinema-active [data-tab="models"] { display: none !important; }
+    body.cinema-active main { padding: 0 !important; margin: 0 !important; max-width: none !important; }
+    body.cinema-active #tile-single {
+      position: fixed !important; inset: 0 !important;
+      margin: 0 !important; padding: 0 !important;
+      background: #000; z-index: 40;
+      width: 100vw !important; height: 100vh !important;
+    }
+    body.cinema-active #tile-single .video-wrap {
+      position: absolute !important; left: 0 !important; right: 0 !important;
+      top: 0 !important; bottom: 96px !important;
+      width: auto !important; height: auto !important;
+      max-height: none !important; max-width: none !important;
+      aspect-ratio: auto !important; margin: 0 !important; padding: 0 !important;
+    }
+    body.cinema-active #tile-single .video-wrap > iframe,
+    body.cinema-active #tile-single .video-wrap > video,
+    body.cinema-active #tile-single .video-wrap > canvas,
+    body.cinema-active #tile-single .video-wrap > img {
+      position: absolute !important; inset: 0 !important;
+      width: 100% !important; height: 100% !important; object-fit: contain;
+    }
+    body.cinema-active .cinema-exit-btn {
+      position: fixed; top: 12px; right: 16px; z-index: 60;
+      background: rgba(15,23,42,.85); color: #f1f5f9; border: 1px solid #475569;
+      border-radius: 999px; padding: 6px 14px; cursor: pointer; font-size: 13px;
+    }
+    body.cinema-active .cinema-analyze-btn,
+    body.native-fullscreen .cinema-analyze-btn,
+    body.native-fullscreen .cinema-exit-btn {
+      position: fixed; top: 12px; right: 16px; z-index: 2147483646;
+      background: rgba(37,99,235,.9); color: #fff; border: 1px solid #2563eb;
+      border-radius: 999px; padding: 6px 18px; cursor: pointer; font-size: 13px;
+    }
+    body.cinema-active .cinema-analyze-btn { right: 140px; }
+    body.native-fullscreen .cinema-exit-btn {
+      background: rgba(15,23,42,.9); border-color: #475569; color: #f1f5f9;
+      right: 16px;
+    }
+    body.native-fullscreen .cinema-analyze-btn { right: 150px; }
+    body.cinema-active #plate-crops-strip {
+      position: fixed; left: 0; right: 0; bottom: 0; height: 96px;
+      display: flex !important; align-items: center; gap: 8px;
+      padding: 8px 12px; z-index: 50; background: rgba(15,23,42,.72);
+      border-top: 1px solid #334155; overflow-x: auto;
+    }
+    #plate-crops-strip { display: none; }
+    #plate-crops-strip .lbl { color: #cbd5e1; font-size: 11px; font-weight: 600;
+      writing-mode: vertical-lr; text-orientation: mixed; padding: 0 6px;
+      flex-shrink: 0; letter-spacing: 0.08em; }
+    #plate-crops-strip img { height: 80px; width: auto; border: 1px solid #475569;
+      border-radius: 4px; flex-shrink: 0; background: #0f172a; }
+    #plate-crops-strip .empty { color: #94a3b8; font-size: 12px; padding: 0 12px; }
+  `;
+  document.head.appendChild(style);
+
+  const strip = document.createElement("div");
+  strip.id = "plate-crops-strip";
+  strip.innerHTML = `<span class="lbl">SAVED PLATE CROPS</span>
+                     <span class="empty">no plate saves yet - waiting for the LPR pass to land one</span>`;
+  document.body.appendChild(strip);
+
+  const exitBtn = document.createElement("button");
+  exitBtn.className = "cinema-exit-btn";
+  exitBtn.textContent = "Exit Cinema";
+  exitBtn.style.display = "none";
+  exitBtn.addEventListener("click", () => toggleCinemaMode(null, false));
+  document.body.appendChild(exitBtn);
+
+  // Cinema-mode Analyze button: the normal Analyze in .tile-head gets
+  // hidden by the cinema-active CSS, so operators lose access to the
+  // layer picker mid-analysis. Mirror it as a fixed button next to
+  // Exit Cinema so switching layers works without leaving Cinema.
+  const analyzeBtn = document.createElement("button");
+  analyzeBtn.className = "cinema-analyze-btn";
+  analyzeBtn.textContent = "Analyze";
+  analyzeBtn.style.display = "none";
+  analyzeBtn.addEventListener("click", () => {
+    // Route the click at the ACTIVE tile's real state so
+    // openAnalysisPicker gets a fully-populated `st` (camNameEl, cam,
+    // analysis). SINGLE_CAM_ID + tileState live in the module scope
+    // that surrounds this handler - safe closure reference, not the
+    // window global (which is undefined for `let` module vars).
+    const sid = SINGLE_CAM_ID;
+    const st = sid ? tileState[sid] : null;
+    if (st) {
+      openAnalysisPicker(st);
+    } else {
+      console.warn("[cinema-analyze] no active tile - pick a camera first");
+    }
+  });
+  document.body.appendChild(analyzeBtn);
+
+  window.__cinemaExitBtn = exitBtn;
+  window.__cinemaAnalyzeBtn = analyzeBtn;
+  window.__cinemaStrip = strip;
+
+  // Browser-native fullscreen (F11 or Element.requestFullscreen inside an
+  // iframe like YouTube's) hides the dashboard's normal Analyze button
+  // because the fullscreen element covers everything else. Track the
+  // change and reveal the floating Analyze / Exit buttons on the same
+  // z-index as the fullscreen surface so the operator keeps the layer
+  // picker within reach without leaving fullscreen.
+  const onFsChange = () => {
+    const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+    document.body.classList.toggle("native-fullscreen", !!fsEl);
+    const showFloat = !!fsEl || document.body.classList.contains("cinema-active");
+    if (analyzeBtn) analyzeBtn.style.display = showFloat ? "block" : "none";
+    if (exitBtn) exitBtn.style.display = showFloat ? "block" : "none";
+    // Wire the exit button to leave fullscreen too, not just Cinema.
+    if (fsEl && exitBtn) {
+      exitBtn.textContent = "Exit Fullscreen";
+      exitBtn.onclick = () => {
+        if (document.exitFullscreen) document.exitFullscreen();
+        else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+      };
+    } else if (exitBtn) {
+      exitBtn.textContent = "Exit Cinema";
+      exitBtn.onclick = null;
+      exitBtn.addEventListener("click", () => toggleCinemaMode(null, false), {once: true});
+    }
+  };
+  document.addEventListener("fullscreenchange", onFsChange);
+  document.addEventListener("webkitfullscreenchange", onFsChange);
+})();
+
+function toggleCinemaMode(st, force) {
+  const active = force !== undefined
+    ? force
+    : !document.body.classList.contains("cinema-active");
+  document.body.classList.toggle("cinema-active", active);
+  const exitBtn = window.__cinemaExitBtn;
+  if (exitBtn) exitBtn.style.display = active ? "block" : "none";
+  const analyzeBtn = window.__cinemaAnalyzeBtn;
+  if (analyzeBtn) analyzeBtn.style.display = active ? "block" : "none";
+  // Re-target SC bbox after the CSS layout has committed. Waiting one
+  // full second is generous, but that's the price of never firing on
+  // the pre-transition size (which was the "stuck video" symptom).
+  if (active) {
+    setTimeout(() => updateScCaptureBbox(st), 1000);
+  } else if (_hudSystemInfo && _hudSystemInfo.screen_capture
+             && _hudSystemInfo.screen_capture.enabled) {
+    fetch("/api/screen-capture/bbox", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    }).catch(() => {});
+  }
+}
+
+// updateScCaptureBbox: POST the video's on-screen rectangle to the
+// screen-capture endpoint so YOLO reads pixels from ONLY the video
+// area, not the black letterbox or the browser chrome around it.
+// Called from cinema toggle, native-fullscreen change, resize (debounced)
+// and analyze-start. Guards against degenerate rects (pre-transition).
+function updateScCaptureBbox(st) {
+  try {
+    if (!_hudSystemInfo || !_hudSystemInfo.screen_capture
+        || !_hudSystemInfo.screen_capture.enabled) return;
+    // A hidden / minimised tab zeroes out outerHeight/outerWidth and
+    // screenX/screenY in Chrome. Publishing a bbox computed from those
+    // zeros produces off-screen coordinates (y1 goes negative) and the
+    // capturer starts grabbing the wrong region. Keep the last known
+    // good bbox instead by short-circuiting whenever the window is not
+    // actually visible on the desktop.
+    if (document.visibilityState !== "visible") return;
+    if (!window.outerHeight || !window.outerWidth) return;
+    // Pick the active tile if st was not provided.
+    if (!st) {
+      const sid = SINGLE_CAM_ID;
+      st = sid ? tileState[sid] : null;
+    }
+    if (!st || !st.videoWrap) return;
+    const el = st.videoWrap.querySelector("iframe")
+             || st.videoWrap.querySelector("video");
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 100 || rect.height < 100) return;
+    const dpr = window.devicePixelRatio || 1;
+    // window.screenY is the OUTER top of the browser window (including
+    // any browser chrome above). window.innerHeight excludes chrome, so
+    // the vertical delta between them is the address bar + tabs. Add
+    // that to rect.top (viewport-relative) to land on the physical Y.
+    // Under browser fullscreen (F11) both deltas are zero so this
+    // reduces to rect.top + screenY, which is correct.
+    const chromeV = window.outerHeight - window.innerHeight;
+    const bbox = {
+      x1: Math.round((rect.left + window.screenX) * dpr),
+      y1: Math.round((rect.top  + window.screenY + chromeV) * dpr),
+      x2: Math.round((rect.right + window.screenX) * dpr),
+      y2: Math.round((rect.bottom + window.screenY + chromeV) * dpr),
+    };
+    // Reject bboxes with any negative coordinate (a sign the math went
+    // off the rails - typically hidden-tab false positive that slipped
+    // past the visibility check).
+    if (bbox.x1 < 0 || bbox.y1 < 0 || bbox.x2 < 0 || bbox.y2 < 0) return;
+    fetch("/api/screen-capture/bbox", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(bbox),
+    }).catch(() => {});
+  } catch (_e) { /* SC bbox is best-effort, never blocks the loop */ }
+}
+
+// Re-target the bbox any time the window resizes / moves (debounced 400 ms).
+let _bboxResizeTimer = null;
+function _bboxResizeSchedule() {
+  clearTimeout(_bboxResizeTimer);
+  _bboxResizeTimer = setTimeout(() => updateScCaptureBbox(null), 400);
+}
+window.addEventListener("resize", _bboxResizeSchedule);
+document.addEventListener("fullscreenchange", () => {
+  setTimeout(() => updateScCaptureBbox(null), 500);
+});
+
+// Poll /api/analysis/saved and populate the strip with plate crops only.
+// Runs whenever cinema is active (once every 3 s) so a fresh save lands
+// in the strip within a tick.
+setInterval(async () => {
+  const strip = window.__cinemaStrip;
+  if (!strip || !document.body.classList.contains("cinema-active")) return;
+  try {
+    const r = await fetch("/api/analysis/saved", { cache: "no-store" });
+    if (!r.ok) return;
+    const j = await r.json();
+    const rows = (j.items || j.saved || []).filter(x =>
+      (x.layer === "plates") || /plate/i.test(x.file || x.name || ""));
+    if (!rows.length) return;
+    const label = strip.querySelector(".lbl");
+    strip.innerHTML = "";
+    if (label) strip.appendChild(label);
+    for (const row of rows.slice(0, 12)) {
+      const src = row.url || row.file || row.path;
+      if (!src) continue;
+      const img = document.createElement("img");
+      img.src = src.startsWith("/") ? src : "/" + src;
+      img.alt = row.plate || row.text || "plate";
+      img.title = `${row.plate || row.text || "unread"} · ${row.ts || row.at || ""}`;
+      strip.appendChild(img);
+    }
+  } catch (_e) { /* keep last known strip on transient errors */ }
+}, 3000);
 
 function buildVideoInto(st, cam) {
   st.lastVideoBuild = { cam };
@@ -367,32 +702,12 @@ analysisPanel.innerHTML = `
       <button data-an-run style="cursor:pointer;background:#2563eb;border:0;
               color:#fff;border-radius:8px;padding:7px 18px;font-size:14px">
         Start</button>
-      <button data-an-editline style="cursor:pointer;background:#334155;border:0;
-              color:#fff;border-radius:8px;padding:7px 14px;font-size:14px;
-              display:none">Edit counting line</button>
       <button data-an-cancel style="cursor:pointer;background:#1e293b;
               border:1px solid #334155;color:#e2e8f0;border-radius:8px;
               padding:7px 14px;font-size:14px">Cancel</button>
     </div>
   </div>`;
 document.body.appendChild(analysisPanel);
-
-analysisPanel.addEventListener("change", (e) => {
-  if (e.target && e.target.name === "an-layer") {
-    const el = analysisPanel.querySelector("[data-an-editline]");
-    el.style.display = (e.target.value === "line") ? "" : "none";
-  }
-});
-
-analysisPanel.querySelector("[data-an-editline]").addEventListener("click",
-  () => {
-    if (!_anTarget) return;
-    const cam = tileAnalysisCamId(_anTarget);
-    if (!cam) { alert("No active camera yet"); return; }
-    analysisPanel.style.display = "none";
-    window.openLineEditor(cam,
-      `/api/analysis/frame?cam=${encodeURIComponent(cam)}&_=${Date.now()}`);
-  });
 
 const _anBoxes = analysisPanel.querySelector("[data-an-boxes]");
 for (const [key, label] of ANALYSIS_LAYER_DEFS) {
@@ -425,7 +740,6 @@ function openAnalysisPicker(st) {
     st.camNameEl.textContent || st.cam.id;
   const errEl = analysisPanel.querySelector("[data-an-err]");
   const runBtn = analysisPanel.querySelector("[data-an-run]");
-  const editBtn = analysisPanel.querySelector("[data-an-editline]");
   const otherActive = _findActiveAnalysisTile(st);
   if (otherActive) {
     const otherName =
@@ -439,7 +753,6 @@ function openAnalysisPicker(st) {
       rb.disabled = true;
     }
     runBtn.disabled = true;
-    editBtn.style.display = "none";
     analysisPanel.style.display = "flex";
     return;
   }
@@ -451,7 +764,6 @@ function openAnalysisPicker(st) {
   for (const rb of _anBoxes.querySelectorAll("input"))
     rb.checked = rb.value === current;
   runBtn.textContent = st.analysis ? "Switch layer" : "Start";
-  editBtn.style.display = (current === "line") ? "" : "none";
   analysisPanel.style.display = "flex";
 }
 
@@ -482,8 +794,17 @@ analysisPanel.querySelector("[data-an-run]").addEventListener("click",
     runBtn.disabled = true;
     errEl.style.color = "#f87171";
     errEl.textContent = "";
+    // Hide the picker overlay before kicking off analysis so it
+    // doesn't linger on top of the video during startup.
+    analysisPanel.style.display = "none";
+    // SC bbox reroute: send the video's on-screen rectangle to the
+    // capturer so YOLO reads only the video pixels (not the black
+    // letterbox / browser chrome / etc.). Uses the shared helper so the
+    // logic and math stay consistent across normal + Cinema + native
+    // fullscreen modes.
+    updateScCaptureBbox(st);
+    let _startOk = false;
     try {
-      await _postScreenCaptureBbox(st);
       const r = await fetch(
         `/api/analysis/start?cam=${encodeURIComponent(cam)}` +
         `&layer=${encodeURIComponent(picked.value)}`,
@@ -501,7 +822,7 @@ analysisPanel.querySelector("[data-an-run]").addEventListener("click",
           throw new Error("layer switch did not take - try again");
       }
       beginTileAnalysis(st, cam, picked.value);
-      analysisPanel.style.display = "none";
+      _startOk = true;
       setTimeout(async () => {
         try {
           const chk = await fetch(
@@ -517,8 +838,13 @@ analysisPanel.querySelector("[data-an-run]").addEventListener("click",
       }, 1200);
     } catch (e) {
       errEl.textContent = "Failed to start: " + e.message;
+      // Start failed - re-open the picker so the operator sees the error
+      // and can pick another layer.
+      analysisPanel.style.display = "flex";
     } finally {
       runBtn.disabled = false;
+      // Absolute guarantee: after success the panel is never left open.
+      if (_startOk) analysisPanel.style.display = "none";
     }
   });
 
@@ -528,9 +854,10 @@ function beginTileAnalysis(st, cam, layer) {
   if (st.analysis) {
     st.analysis.layer = layer;
     st.analysis.tickBuf.length = 0;
-    const tag = st.videoWrap.querySelector(".analysis-live-tag");
-    if (tag) tag.textContent = `LIVE ANALYSIS - ${_layerLabel[layer] || layer}`;
-    const lb = st.videoWrap.querySelector(".analysis-drawline");
+    const barRoot = st.analysis.bar || st.videoWrap;
+    const tag = barRoot.querySelector(".analysis-live-tag");
+    if (tag) tag.textContent = `LIVE - ${_layerLabel[layer] || layer}`;
+    const lb = barRoot.querySelector(".analysis-drawline");
     if (lb) {
       lb.style.display = DRAWABLE_LAYERS[layer] ? "" : "none";
       if (DRAWABLE_LAYERS[layer]) lb.textContent = DRAWABLE_LAYERS[layer];
@@ -539,6 +866,11 @@ function beginTileAnalysis(st, cam, layer) {
   }
   st._overlayWasHidden = st.overlay.style.display === "none";
   st.overlay.style.display = "none";
+  // Operator request 2026-08-18: no more buttons on top of the video.
+  // Everything the operator needs to see or click while analysis is
+  // running lives in a status bar ABOVE the player. Only the actual
+  // detection drawing (canvas + still-frame background for iframe
+  // sources) stays inside the video-wrap.
   const wrap = document.createElement("div");
   wrap.className = "analysis-wrap analysis-overlay-mode";
   wrap.style.cssText = "position:absolute;inset:0;pointer-events:none;"
@@ -549,56 +881,71 @@ function beginTileAnalysis(st, cam, layer) {
                 object-fit:contain;background:#0f172a;display:block;">
     <canvas class="analysis-canvas"
             style="position:absolute;inset:0;width:100%;height:100%;
-                   pointer-events:none;background:transparent;"></canvas>
-    <div class="analysis-status"
-         style="position:absolute;left:8px;top:8px;padding:4px 10px;
-                background:rgba(15,23,42,0.85);color:#e2e8f0;border-radius:6px;
-                font-size:12px;pointer-events:none;">starting live analysis...</div>
-    <span class="analysis-live-tag"
-          style="position:absolute;right:8px;top:8px;padding:4px 10px;
-                 background:rgba(37,99,235,0.9);color:#f8fafc;border-radius:6px;
-                 font-size:12px;font-weight:600;pointer-events:none;">LIVE -
-      ${escapeHtml(_layerLabel[layer] || layer)}</span>
-    <button class="analysis-drawline"
-            style="position:absolute;right:78px;bottom:8px;padding:6px 12px;
-                   background:#2563eb;color:#f8fafc;border:0;border-radius:6px;
-                   cursor:pointer;font-size:13px;pointer-events:auto;
-                   display:${DRAWABLE_LAYERS[layer] ? "" : "none"};">
-      ${DRAWABLE_LAYERS[layer] || "Draw"}</button>
-    <button class="analysis-stop"
-            style="position:absolute;right:8px;bottom:8px;padding:6px 12px;
-                   background:#dc2626;color:#f8fafc;border:0;border-radius:6px;
-                   cursor:pointer;font-size:13px;pointer-events:auto;">
-      Stop</button>
-    <div class="analysis-hud"
-         style="position:absolute;left:8px;top:44px;min-width:160px;
-                padding:8px 10px;background:rgba(2,6,23,0.72);
-                color:#e2e8f0;border:1px solid rgba(148,163,184,0.35);
-                border-radius:8px;font:12px/1.35 system-ui, sans-serif;
-                pointer-events:none;backdrop-filter:blur(4px);
-                display:grid;grid-template-columns:auto auto;
-                column-gap:12px;row-gap:3px;
-                box-shadow:0 6px 22px rgba(0,0,0,.35)">
-      <span style="color:#94a3b8">People</span>
-        <b class="hud-people" style="text-align:right;color:#4ade80">-</b>
-      <span style="color:#94a3b8">Vehicles</span>
-        <b class="hud-veh"    style="text-align:right;color:#60a5fa">-</b>
-      <span style="color:#94a3b8">Tick</span>
-        <b class="hud-tick"   style="text-align:right;color:#fbbf24">-</b>
-      <span style="color:#94a3b8">Alerts</span>
-        <b class="hud-alerts" style="text-align:right;color:#f97316">0</b>
-      <span style="color:#94a3b8">Model</span>
-        <b class="hud-model"  style="text-align:right;color:#cbd5e1">-</b>
-      <span style="color:#94a3b8">Camera</span>
-        <b class="hud-cam"    style="text-align:right;color:#cbd5e1;
-           max-width:160px;overflow:hidden;text-overflow:ellipsis;
-           white-space:nowrap" title="${escapeHtml(cam)}">${escapeHtml(cam)}</b>
-    </div>`;
+                   pointer-events:none;background:transparent;"></canvas>`;
   st.videoWrap.style.position = st.videoWrap.style.position || "relative";
   st.videoWrap.appendChild(wrap);
-  wrap.querySelector(".analysis-stop").addEventListener("click",
+
+  // Status bar sibling ABOVE the video. ONE horizontal row, three
+  // logical zones separated by dot dividers:
+  //   LEFT  - Model / Camera / CPU / RAM / GPU (system + selected cam)
+  //   MID   - LIVE tag + People / Vehicles / Tick / Alerts (KPIs)
+  //   RIGHT - Draw line (only for drawable layers) + Stop
+  // Everything on one line, aligned baseline. Wraps only when the
+  // viewport is genuinely too narrow to keep everything inline.
+  const bar = document.createElement("div");
+  bar.className = "tile-status-bar";
+  bar.style.cssText =
+    "display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;"
+    + "padding:9px 14px;margin:8px 0;background:linear-gradient(90deg,"
+    + "#0b1220 0%,#111a2e 100%);border:1px solid #1e293b;"
+    + "border-radius:10px;font:12.5px/1.4 system-ui,sans-serif;"
+    + "color:#e2e8f0;box-shadow:0 2px 8px rgba(0,0,0,0.35)";
+  const _pill = "background:#0f172a;border:1px solid #1e293b;"
+              + "border-radius:999px;padding:3px 9px;white-space:nowrap;"
+              + "display:inline-flex;align-items:baseline;gap:5px";
+  const _lbl = "color:#94a3b8;font-size:11px;letter-spacing:0.02em";
+  bar.innerHTML = `
+    <span class="analysis-live-tag" style="padding:4px 11px;
+       background:linear-gradient(90deg,#2563eb,#3b82f6);color:#f8fafc;
+       border-radius:999px;font-size:12px;font-weight:700;
+       letter-spacing:0.03em;box-shadow:0 1px 4px rgba(37,99,235,0.5)">
+       LIVE - ${escapeHtml(_layerLabel[layer] || layer)}</span>
+    <span style="${_pill}"><span style="${_lbl}">Model</span>
+       <b class="hud-model" style="color:#cbd5e1">-</b></span>
+    <span style="${_pill}"><span style="${_lbl}">Cam</span>
+       <b class="hud-cam" style="color:#cbd5e1;max-width:180px;
+       overflow:hidden;text-overflow:ellipsis"
+       title="${escapeHtml(cam)}">${escapeHtml(cam)}</b></span>
+    <span style="${_pill}"><span style="${_lbl}">CPU</span>
+       <b class="hud-cpu" style="color:#fbbf24">-</b></span>
+    <span style="${_pill}"><span style="${_lbl}">RAM</span>
+       <b class="hud-ram" style="color:#fbbf24">-</b></span>
+    <span style="${_pill}"><span style="${_lbl}">GPU</span>
+       <b class="hud-gpu" style="color:#a5f3fc">N/A</b></span>
+    <span style="flex:1"></span>
+    <span style="${_pill}"><span style="${_lbl}">People</span>
+       <b class="hud-people" style="color:#4ade80">-</b></span>
+    <span style="${_pill}"><span style="${_lbl}">Vehicles</span>
+       <b class="hud-veh" style="color:#60a5fa">-</b></span>
+    <span style="${_pill}"><span style="${_lbl}">Tick</span>
+       <b class="hud-tick" style="color:#fbbf24">-</b></span>
+    <span style="${_pill}"><span style="${_lbl}">Alerts</span>
+       <b class="hud-alerts" style="color:#f97316">0</b></span>
+    <span class="analysis-status" style="color:#64748b;font-size:11px;
+       font-style:italic">starting live analysis...</span>
+    <button class="analysis-drawline" style="padding:6px 14px;
+       background:#2563eb;color:#f8fafc;border:0;border-radius:6px;
+       cursor:pointer;font-size:12.5px;font-weight:600;
+       display:${DRAWABLE_LAYERS[layer] ? "" : "none"}">
+       ${DRAWABLE_LAYERS[layer] || "Draw"}</button>
+    <button class="analysis-stop" style="padding:6px 14px;
+       background:#dc2626;color:#f8fafc;border:0;border-radius:6px;
+       cursor:pointer;font-size:12.5px;font-weight:600">Stop</button>`;
+  st.videoWrap.insertAdjacentElement("beforebegin", bar);
+  st.analysisBar = bar;
+  bar.querySelector(".analysis-stop").addEventListener("click",
     () => stopTileAnalysis(st));
-  wrap.querySelector(".analysis-drawline").addEventListener("click", () => {
+  bar.querySelector(".analysis-drawline").addEventListener("click", () => {
     const snap =
       `/api/analysis/frame?cam=${encodeURIComponent(cam)}&_=${Date.now()}`;
     const lay = st.analysis ? st.analysis.layer : layer;
@@ -608,9 +955,10 @@ function beginTileAnalysis(st, cam, layer) {
   st.analysis = {
     cam, layer,
     wrap,
+    bar,
     bg: wrap.querySelector(".analysis-bg"),
     canvas: wrap.querySelector(".analysis-canvas"),
-    status: wrap.querySelector(".analysis-status"),
+    status: bar.querySelector(".analysis-status"),
     lastBgUrl: null,
     tickBuf: [],
     failures: 0, lastRestart: 0, inflight: false, lastSeq: -1,
@@ -618,7 +966,7 @@ function beginTileAnalysis(st, cam, layer) {
     evTimer: setInterval(() => pollAnalysisEvents(st), 2500),
     timer: setInterval(() => pollAnalysisFrame(st), ANALYSIS_POLL_MS),
     videoStateTimer: setInterval(() => _syncAnalysisBgVisibility(st), 500),
-    bboxSyncTimer: setInterval(() => _postScreenCaptureBbox(st), 2500),
+    sysTimer: setInterval(() => _pollSystemLive(st), 3000),
   };
   st.analysis.bg.style.display = "block";
   st.analysis.canvas.style.display = "none";
@@ -781,22 +1129,199 @@ async function renderGallery() {
                        || (b.ts || 0) - (a.ts || 0));
   wrap.innerHTML = items.map((it) => {
     const t = new Date((it.ts || 0) * 1000);
-    return `<figure style="margin:0;background:#0c0e13;border:1px solid
-        #232733;border-radius:8px;overflow:hidden">
-      <a href="${it.image}" target="_blank" rel="noopener">
+    const idSafe = escapeHtml(String(it.id || ""));
+    return `<figure data-saved-id="${idSafe}" style="margin:0;position:relative;
+        background:#0c0e13;border:1px solid #232733;border-radius:6px;
+        overflow:hidden">
+      <button data-saved-delete="${idSafe}" title="Delete this saved crop"
+        style="position:absolute;top:4px;right:4px;z-index:2;width:22px;
+        height:22px;padding:0;line-height:20px;border:0;border-radius:11px;
+        background:rgba(2,6,23,.72);color:#fca5a5;font-size:14px;
+        cursor:pointer">×</button>
+      <a href="#" data-pipeline-expand="${idSafe}">
         <img src="${it.image}" alt="" loading="lazy"
-             style="width:100%;height:130px;object-fit:cover;display:block"></a>
-      <figcaption style="padding:6px 8px">
-        <div style="font-size:11px;color:#e7e9ee;white-space:nowrap;
-             overflow:hidden;text-overflow:ellipsis">${escapeHtml(it.text)}</div>
-        <div style="font-size:10px;color:#8b909a">${escapeHtml(it.layer)} -
-          ${escapeHtml(it.cam_name || it.cam)} - ${t.toLocaleTimeString()}</div>
+             style="width:100%;height:96px;object-fit:cover;display:block"></a>
+      <figcaption style="padding:5px 6px">
+        <div style="font-size:10px;color:#e7e9ee;white-space:nowrap;
+             overflow:hidden;text-overflow:ellipsis"
+             title="${escapeHtml(it.text)}">${escapeHtml(it.text)}</div>
+        <div style="font-size:9px;color:#8b909a;white-space:nowrap;
+             overflow:hidden;text-overflow:ellipsis">
+          ${escapeHtml(it.layer)} - ${t.toLocaleTimeString()}</div>
       </figcaption>
     </figure>`;
   }).join("");
+  // Wire per-tile delete
+  wrap.querySelectorAll("[data-saved-delete]").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const id = btn.getAttribute("data-saved-delete");
+      if (!id) return;
+      btn.disabled = true; btn.style.opacity = "0.4";
+      try {
+        const r = await fetch(
+          `/api/analysis/saved-delete?id=${encodeURIComponent(id)}`,
+          { method: "POST" });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        renderGallery();
+      } catch (err) {
+        btn.disabled = false; btn.style.opacity = "1";
+        btn.textContent = "!";
+      }
+    });
+  });
+  // Wire per-tile expand -> 4-stage pipeline modal
+  wrap.querySelectorAll("[data-pipeline-expand]").forEach((a) => {
+    a.addEventListener("click", (e) => {
+      e.preventDefault();
+      const id = a.getAttribute("data-pipeline-expand");
+      const it = items.find((x) => String(x.id) === id);
+      if (it) openPipelineModal(it);
+    });
+  });
+}
+
+// 4-stage LPR pipeline viewer: click a saved plate in the gallery to
+// open a modal that walks the crop through Vehicle -> Plate -> Enhanced
+// -> Final. Stages B/C/D are computed client-side from the same saved
+// annotated frame; no additional backend calls beyond the existing
+// image asset.
+function openPipelineModal(it) {
+  const bg = document.createElement("div");
+  bg.style.cssText =
+    "position:fixed;inset:0;background:rgba(2,6,23,.82);z-index:80;" +
+    "display:flex;align-items:center;justify-content:center;padding:20px;" +
+    "box-sizing:border-box";
+  const box = document.createElement("div");
+  box.style.cssText =
+    "background:#0f172a;border:1px solid #334155;border-radius:14px;" +
+    "max-width:1080px;width:100%;max-height:92vh;color:#e2e8f0;" +
+    "display:flex;flex-direction:column;overflow:hidden";
+  const rawText = String(it.text || "").replace(/^plate:?\s*/i, "");
+  box.innerHTML = `
+    <div style="padding:14px 20px;flex:0 0 auto;border-bottom:1px solid #1e293b;
+                display:flex;align-items:center;gap:14px">
+      <div style="flex:1">
+        <div style="font-weight:700;font-size:16px">
+          LPR pipeline &mdash; <span style="color:#93c5fd">
+            ${escapeHtml(rawText)}</span>
+        </div>
+        <div style="font-size:12px;color:#94a3b8;margin-top:2px">
+          ${escapeHtml(it.layer || "plates")} &middot;
+          ${escapeHtml(it.cam_name || it.cam || "")} &middot;
+          ${new Date((it.ts || 0) * 1000).toLocaleString()}
+        </div>
+      </div>
+      <label style="font-size:12px;color:#94a3b8;
+                   display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="checkbox" data-lpr-enhance>
+        Enhance plate (contrast &middot; brightness)
+      </label>
+      <button data-lpr-close style="background:#334155;color:#e2e8f0;border:0;
+              border-radius:8px;padding:6px 14px;cursor:pointer">Close</button>
+    </div>
+    <div style="padding:16px 20px;overflow:auto;display:grid;
+                grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
+                gap:14px">
+      ${["A. Vehicle crop", "B. Plate crop",
+         "C. Enhanced plate", "D. Final view"].map((title, i) => `
+        <div style="background:#0b1223;border:1px solid #1e293b;
+                    border-radius:10px;overflow:hidden;
+                    display:flex;flex-direction:column">
+          <div style="padding:8px 12px;font-size:12px;color:#94a3b8;
+                     background:#0a0f1c;border-bottom:1px solid #1e293b">
+            ${title}
+          </div>
+          <div style="flex:1;position:relative;background:#000;min-height:170px">
+            <canvas data-lpr-stage="${i}"
+              style="display:block;width:100%;height:auto"></canvas>
+          </div>
+        </div>`).join("")}
+    </div>`;
+  bg.appendChild(box);
+  document.body.appendChild(bg);
+  bg.addEventListener("click", (e) => { if (e.target === bg) bg.remove(); });
+  box.querySelector("[data-lpr-close]").addEventListener("click",
+    () => bg.remove());
+  const stageEls = box.querySelectorAll("[data-lpr-stage]");
+  const enhanceInput = box.querySelector("[data-lpr-enhance]");
+  const img = new Image();
+  img.crossOrigin = "anonymous";
+  img.onload = () => paintStages(img, stageEls, enhanceInput.checked);
+  enhanceInput.addEventListener("change",
+    () => paintStages(img, stageEls, enhanceInput.checked));
+  img.src = it.image;
+}
+
+function paintStages(img, canvases, enhance) {
+  // Stage A - full annotated frame. Stages B/D zoom into the bottom-
+  // center 40% (where the plate + caption sit) since the backend saved
+  // an annotated crop centred on the vehicle. Stage C = Stage B with
+  // contrast/brightness boost applied via canvas filter (equivalent to
+  // the ESPCN + CLAHE preprocessing the OCR pass runs internally).
+  const iw = img.naturalWidth, ih = img.naturalHeight;
+  if (!iw || !ih) return;
+  const setSize = (c, w, h) => {
+    c.width = w; c.height = h;
+    c.style.aspectRatio = `${w}/${h}`;
+  };
+  // Stage A: full image
+  const cA = canvases[0];
+  setSize(cA, iw, ih);
+  cA.getContext("2d").drawImage(img, 0, 0);
+  // Stages B/C/D: crop bottom-center where plate lives.
+  // For a typical vehicle crop the plate + caption sit in the bottom
+  // 45%. Take the FULL width but crop the top 55%.
+  const bx = 0, by = Math.round(ih * 0.30);
+  const bw = iw, bh = Math.max(1, ih - by);
+  const drawCropped = (c, filter) => {
+    setSize(c, bw, bh);
+    const ctx = c.getContext("2d");
+    ctx.filter = filter || "none";
+    ctx.drawImage(img, bx, by, bw, bh, 0, 0, bw, bh);
+    ctx.filter = "none";
+  };
+  drawCropped(canvases[1], "none");
+  const enhFilter = enhance
+    ? "contrast(1.6) brightness(1.1) saturate(1.2)"
+    : "contrast(1.25) brightness(1.05)";
+  drawCropped(canvases[2], enhFilter);
+  // Stage D: same as C but rendered larger (2x pixel density) for
+  // eyeball verification of digit shapes.
+  const c = canvases[3];
+  setSize(c, bw * 2, bh * 2);
+  const ctx = c.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.filter = enhFilter;
+  ctx.drawImage(img, bx, by, bw, bh, 0, 0, bw * 2, bh * 2);
+  ctx.filter = "none";
 }
 renderGallery();
 setInterval(renderGallery, 20000);
+
+// Clear all saved detections - one confirm, then wipe the gallery.
+(function initGalleryClear() {
+  const btn = document.getElementById("gallery-clear");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    if (!confirm("Delete every saved detection crop from this machine? "
+                 + "This cannot be undone.")) return;
+    btn.disabled = true;
+    const orig = btn.textContent;
+    btn.textContent = "clearing...";
+    try {
+      const r = await fetch("/api/analysis/saved-clear", { method: "POST" });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d && d.error || ("HTTP " + r.status));
+      btn.textContent = `cleared ${d.removed || 0}`;
+    } catch (e) {
+      btn.textContent = "err: " + e.message;
+    }
+    setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2000);
+    renderGallery();
+  });
+})();
 
 // ---------- Draw loop + extrapolation -------------------------------------
 
@@ -927,38 +1452,11 @@ function _shiftBox(b, dt) {
   return o;
 }
 
-// Screen-capture fallback: when yt-dlp is blocked, the backend reads pixels
-// off the operator's primary display via PIL.ImageGrab. Frames come back in
-// full-screen coords, but the canvas overlay scales to the video iframe, so
-// we tell the backend to crop to the iframe's screen-space rectangle. Then
-// frame_w/frame_h == iframe_w/iframe_h and boxes land on real people.
-async function _postScreenCaptureBbox(st) {
-  try {
-    if (!st || !st.videoWrap) return;
-    const el = st.videoWrap.querySelector("iframe[data-youtube]")
-      || st.videoWrap.querySelector("iframe")
-      || st.videoWrap.querySelector("video");
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    if (!r || r.width < 40 || r.height < 40) return;
-    const dpr = window.devicePixelRatio || 1;
-    const sx = (window.screenX !== undefined
-                ? window.screenX : window.screenLeft) || 0;
-    const sy = (window.screenY !== undefined
-                ? window.screenY : window.screenTop) || 0;
-    const chromeTop = Math.max(0, window.outerHeight - window.innerHeight);
-    const bbox = {
-      x1: Math.round((sx + r.left) * dpr),
-      y1: Math.round((sy + chromeTop + r.top) * dpr),
-      x2: Math.round((sx + r.right) * dpr),
-      y2: Math.round((sy + chromeTop + r.bottom) * dpr),
-    };
-    await fetch("/api/screen-capture/bbox", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(bbox),
-    });
-  } catch (_) { /* best-effort - fallback keeps working full-screen */ }
+// Screen-capture fallback removed 2026-08-18 - it burned whatever was
+// on the operator's desktop into frames instead of the actual video.
+// Kept as a no-op stub in case any lingering caller still references it.
+async function _postScreenCaptureBbox(_st) {
+  return;
 }
 
 // Premium HUD sidebar (2026-08-17). Reads from the tick payload +
@@ -984,7 +1482,7 @@ function _hudLoadSystemInfo() {
         const st = tileState[key];
         const a = st && st.analysis;
         if (!a || !a.wrap) continue;
-        const m = a.wrap.querySelector(".hud-model");
+        const m = (a.bar || a.wrap).querySelector(".hud-model");
         if (m) m.textContent = _hudSystemInfo.model || "-";
       }
       // Populate the top-right capability chip once - color the
@@ -1011,18 +1509,74 @@ function _hudLoadSystemInfo() {
           chip.style.borderColor = "#78350f";
           chip.style.color = "#fed7aa";
         }
+        // Screen-capture indicator: only rendered when the backend has
+        // SCREEN_CAPTURE_FALLBACK=1. Operators need to know the analysis
+        // is running on desktop pixels (not YouTube stream) so they keep
+        // the browser tab with the iframe visible on the primary display.
+        const sc = _hudSystemInfo.screen_capture;
+        let scChip = document.getElementById("sc-chip");
+        if (sc && sc.enabled) {
+          if (!scChip) {
+            scChip = document.createElement("div");
+            scChip.id = "sc-chip";
+            scChip.className = "sub";
+            scChip.style.cssText =
+              "display:inline-block;margin-left:8px;padding:2px 10px;" +
+              "border-radius:999px;font-size:12px;background:#3f1d1d;" +
+              "border:1px solid #7f1d1d;color:#fecaca;cursor:help";
+            chip.parentNode.insertBefore(scChip, chip.nextSibling);
+          }
+          scChip.textContent = sc.bbox
+            ? "SCREEN CAPTURE (bbox)"
+            : "SCREEN CAPTURE (full display)";
+          scChip.title = sc.bbox
+            ? `capturing bbox ${sc.bbox.join(",")} - keep the browser iframe visible on the primary display`
+            : "capturing the primary display fully - keep the browser iframe visible";
+          scChip.style.display = "";
+        } else if (scChip) {
+          scChip.style.display = "none";
+        }
       }
     })
     .catch(() => { _hudSystemInflight = false; });
 }
 _hudLoadSystemInfo();
 
+// Header line updater. The "Model: loading..." placeholder used to be
+// swapped out by the removed RL script; without a replacement it stayed
+// forever. Now we pull the scoreboard from /api/model-metrics and format
+// a plain one-liner. Refreshes every 10 s.
+function _refreshHeaderMetricsLine() {
+  const el = document.getElementById("model-metrics-line");
+  if (!el) return;
+  fetch("/api/model-metrics", { cache: "no-store" })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((d) => {
+      if (!d) return;
+      const line = d.header_line
+        || `reviews: ${d.reviews || 0}`;
+      const backend = (_hudSystemInfo && _hudSystemInfo.model)
+        ? ` - detector: ${_hudSystemInfo.model}` : "";
+      el.textContent = line + backend;
+    })
+    .catch(() => {
+      // On failure show the detector chip at least, don't stay stuck.
+      if (_hudSystemInfo && _hudSystemInfo.model) {
+        el.textContent = "detector: " + _hudSystemInfo.model;
+      } else {
+        el.textContent = "model info unavailable";
+      }
+    });
+}
+_refreshHeaderMetricsLine();
+setInterval(_refreshHeaderMetricsLine, 10000);
+
 function _updateAnalysisHud(a, d) {
-  if (!a || !a.wrap) return;
-  const p = a.wrap.querySelector(".hud-people");
-  const v = a.wrap.querySelector(".hud-veh");
-  const t = a.wrap.querySelector(".hud-tick");
-  const m = a.wrap.querySelector(".hud-model");
+  if (!a || !(a.bar || a.wrap)) return;
+  const p = (a.bar || a.wrap).querySelector(".hud-people");
+  const v = (a.bar || a.wrap).querySelector(".hud-veh");
+  const t = (a.bar || a.wrap).querySelector(".hud-tick");
+  const m = (a.bar || a.wrap).querySelector(".hud-model");
   if (p) p.textContent = String(d.person ?? "-");
   if (v) v.textContent = String(d.vehicles ?? "-");
   if (t) {
@@ -1040,9 +1594,50 @@ function _updateAnalysisHud(a, d) {
 }
 
 function _updateAnalysisHudAlerts(a, count) {
-  if (!a || !a.wrap) return;
-  const el = a.wrap.querySelector(".hud-alerts");
+  if (!a || !(a.bar || a.wrap)) return;
+  const el = (a.bar || a.wrap).querySelector(".hud-alerts");
   if (el) el.textContent = String(count);
+}
+
+// Poll CPU/RAM/GPU utilisation into the status-bar HUD above the
+// player. Silent-on-failure - stale numbers just linger, they don't
+// break the analysis loop.
+function _pollSystemLive(st) {
+  const a = st && st.analysis;
+  if (!a || !a.bar) return;
+  fetch("/api/system/live", { cache: "no-store" })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j) => {
+      if (!j || !a.bar || !a.bar.isConnected) return;
+      const cpu = a.bar.querySelector(".hud-cpu");
+      const ram = a.bar.querySelector(".hud-ram");
+      const gpu = a.bar.querySelector(".hud-gpu");
+      if (cpu) cpu.textContent = (j.cpu_pct != null)
+        ? j.cpu_pct.toFixed(0) + "%" : "-";
+      if (ram) ram.textContent = (j.ram_pct != null)
+        ? `${j.ram_pct.toFixed(0)}% (${j.ram_used_gb}/${j.ram_total_gb}GB)`
+        : "-";
+      if (gpu) {
+        if (j.gpus && j.gpus.length) {
+          const g = j.gpus[0];
+          if (g.util_pct != null && g.mem_used_gb != null) {
+            gpu.textContent = `${g.util_pct.toFixed(0)}% `
+              + `(${g.mem_used_gb}/${g.mem_total_gb}GB)`;
+          } else {
+            // OpenVINO / WMIC: name only, no util numbers
+            const short = (g.name || "GPU")
+              .replace(/\(R\)/g, "").replace(/\(TM\)/g, "")
+              .replace(/Intel /i, "").trim();
+            gpu.textContent = short.slice(0, 32);
+          }
+          gpu.title = g.name + " (via " + (g.source || "?") + ")";
+        } else {
+          gpu.textContent = "N/A";
+          gpu.title = "no GPU detected";
+        }
+      }
+    })
+    .catch(() => {});
 }
 
 function _syncAnalysisBgVisibility(st) {
@@ -1105,7 +1700,8 @@ async function pollAnalysisFrame(st) {
     if (r.status === 200) {
       const d = await r.json();
       a.actualLayer = d.layer;
-      const liveTag = st.videoWrap.querySelector(".analysis-live-tag");
+      const liveTag = (st.analysisBar || st.videoWrap)
+        .querySelector(".analysis-live-tag");
       if (d.layer === a.layer) {
         if (liveTag) liveTag.textContent =
           `LIVE - ${_layerLabel[d.layer] || d.layer}`;
@@ -1723,8 +2319,8 @@ function stopTileAnalysis(st) {
   if (!a) return;
   clearInterval(a.timer);
   if (a.videoStateTimer) clearInterval(a.videoStateTimer);
-  if (a.bboxSyncTimer) clearInterval(a.bboxSyncTimer);
   if (a.evTimer) clearInterval(a.evTimer);
+  if (a.sysTimer) clearInterval(a.sysTimer);
   if (a.evStrip) a.evStrip.remove();
   if (a.lastBgUrl) URL.revokeObjectURL(a.lastBgUrl);
   st.analysis = null;
@@ -1732,6 +2328,10 @@ function stopTileAnalysis(st) {
         { method: "POST" }).catch(() => {});
   const wrap = st.videoWrap.querySelector(".analysis-wrap");
   if (wrap) wrap.remove();
+  if (st.analysisBar) {
+    st.analysisBar.remove();
+    st.analysisBar = null;
+  }
   const strip = st.tile && st.tile.querySelector(".crossings-strip");
   if (strip) strip.remove();
   if (!st._overlayWasHidden) st.overlay.style.display = "";
@@ -1872,14 +2472,38 @@ function _updateLocalTileBadges(camId, j) {
   renderSampleAge(st);
 }
 
+// After N consecutive 404s per camera, back off to a much slower cadence
+// so the dashboard doesn't flood serve.py logs with 404s when the notebook
+// Section 7 (the only writer of model_view/<cam>.json) is not running -
+// which is the standalone-dashboard operator's default state.
+const _MODEL_VIEW_MAX_MISS = 3;
+const _modelViewMisses = new Map();          // cam_id -> miss count
+const _modelViewNextTry = new Map();         // cam_id -> earliest Date.now() to poll again
+
 async function pollLocalModelView() {
   if (!SINGLE_CAM_ID) return;
-  const url = MODEL_VIEW_JSON(SINGLE_CAM_ID) + `?_=${Date.now()}`;
+  const cam = SINGLE_CAM_ID;
+  const now = Date.now();
+  const nextTry = _modelViewNextTry.get(cam) || 0;
+  if (now < nextTry) return;                 // backing off
+  const url = MODEL_VIEW_JSON(cam) + `?_=${now}`;
   try {
     const r = await fetch(url, { cache: "no-store" });
-    if (!r.ok) return;
+    if (!r.ok) {
+      const misses = (_modelViewMisses.get(cam) || 0) + 1;
+      _modelViewMisses.set(cam, misses);
+      if (misses >= _MODEL_VIEW_MAX_MISS) {
+        // Cold-start standalone dashboard: no notebook writer, no file.
+        // Back off to once per 5 minutes; the notebook can still turn it
+        // on later and the next hit resets the counter.
+        _modelViewNextTry.set(cam, now + 5 * 60 * 1000);
+      }
+      return;
+    }
+    _modelViewMisses.set(cam, 0);
+    _modelViewNextTry.set(cam, 0);
     const j = await r.json();
-    _updateLocalTileBadges(SINGLE_CAM_ID, j);
+    _updateLocalTileBadges(cam, j);
   } catch (_) { /* not yet written */ }
 }
 
@@ -2550,10 +3174,13 @@ async function boot() {
   }
   SINGLE_CAM_ID = cam.id || cam.cam_id || urlCam;
   SINGLE_CAM = cam;
-  buildSingleTile(cam);
+  const st = buildSingleTile(cam);
   if (status) status.textContent = "";
   pollLocalModelView();
   setInterval(pollLocalModelView, 8000);
+  // ?cinema=1 auto-toggle removed 2026-08-20 per operator request:
+  // Cinema should always be an explicit user action - the auto-toggle
+  // surprised operators who wanted the normal dashboard first.
 }
 
 document.addEventListener("DOMContentLoaded", boot);
