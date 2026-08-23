@@ -79,17 +79,14 @@ def _find_weight(bare_name: str) -> str:
     return bare_name
 
 
-# 2026-08-21: upgraded plate detector from yolov8n-plate (nano, ~6 MB,
-# operator note "may be too weak") to YOLOv11-s license-plate finetune
-# (~19 MB, morsetechlab/yolov11-license-plate-detection on HF, 71k+
-# downloads). YOLOv11 architecture + Small variant + LP-only training
-# lifts recall on partly-obscured / motorcycle / small-in-frame plates,
-# still runs on CPU inside the tick budget. Falls back to yolov8n-plate
-# if the newer file isn't on disk, so an operator who hasn't downloaded
-# it yet keeps the pre-upgrade behavior.
+# Plate detector: YOLOv11-s license-plate finetune (~19 MB,
+# morsetechlab/yolov11-license-plate-detection on HF, 71k+ downloads).
+# YOLOv11 architecture + Small variant + LP-only training lifts recall
+# on partly-obscured / motorcycle / small-in-frame plates, still runs
+# on CPU inside the tick budget. The yolov8n-plate fallback was retired
+# in the 2026-08-23 cleanup - the notebook setup cell fetches the v11s
+# weight, so a missing file means setup has not run yet.
 PLATE_WEIGHTS_DEFAULT = _find_weight("yolov11s-plate.pt")
-if not os.path.isfile(PLATE_WEIGHTS_DEFAULT):
-    PLATE_WEIGHTS_DEFAULT = _find_weight("yolov8n-plate.pt")
 PLATE_OCR_DEFAULT = _find_weight("plate_ocr_global.onnx")
 
 # Plate-detector confidence floor on the vehicle crop. Permissive on
@@ -279,7 +276,7 @@ def load_plate_model(weights: str | None = None):
     """Load (once) the plate detector; prefers a sibling
     `<stem>_openvino_model` export exactly like the detection and pose
     loaders. Export once with:
-        YOLO("yolov8n-plate.pt").export(format="openvino", imgsz=256)
+        YOLO("yolov11s-plate.pt").export(format="openvino", imgsz=256)
     """
     global _det_model
     if _det_model is not None:
@@ -619,7 +616,7 @@ def attach_plates(det_model, ocr: "_MultiScriptOcr", frame, tracker,
         x1 = max(0, int(b["x1"]) - 4); y1 = max(0, int(b["y1"]) - 4)
         x2 = min(W, int(b["x2"]) + 4); y2 = min(H, int(b["y2"]) + 4)
         # 2026-08-21: the "skip the top X% of the vehicle box before
-        # handing to yolov8n-plate" heuristic was catastrophic on Thai
+        # handing to the plate detector" heuristic was catastrophic on Thai
         # street cams - the plate detector was trained on full-vehicle
         # context (wheels, taillights, plate frame). Feeding it just
         # the bottom slice + then letterboxing to imgsz=640 stripped
@@ -642,7 +639,7 @@ def attach_plates(det_model, ocr: "_MultiScriptOcr", frame, tracker,
             continue
         entry["tries"] += 1
         # 2026-08-15: super-resolve the vehicle crop itself before the
-        # plate detector when it is small. yolov8n-plate returned 0
+        # plate detector when it is small. The nano-era detector returned 0
         # boxes on every audit-frame vehicle at 60-110 px because the
         # plate inside is only 15-25 px wide - below the detector's
         # own receptive field. FSRCNN 4x on a 100 px vehicle produces
@@ -764,7 +761,7 @@ def attach_plates(det_model, ocr: "_MultiScriptOcr", frame, tracker,
             b["plate_conf"] = entry["conf"]
             # plate_box is in FRAME coords: the crop y-origin is y1
             # (the vehicle box top edge) since 2026-08-21 we hand the
-            # full vehicle box to yolov8n-plate instead of the bottom
+            # full vehicle box to the plate detector instead of the bottom
             # slice. The plate detector's px1/px2/py1/py2 are already
             # in the FULL-vehicle-crop coord system.
             b["plate_box"] = [x1 + px1, y1 + py1,

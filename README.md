@@ -71,7 +71,7 @@ python serve.py                     # opens http://localhost:8000
 Model weights are not shipped with the repo (see
 [Model files](#model-files)). The notebook's setup cell (section 0,
 `## 0. Setup`) verifies Python dependencies AND downloads every optional
-weight directly onto the machine running the notebook — `yolo26m.pt`
+weight directly onto the machine running the notebook - `yolo26m.pt`
 and `yolov8n-pose.pt` come via `ultralytics` on first model load; the
 LPR + face weights are fetched by the same setup cell before that. No
 manual downloads, no separate script.
@@ -158,14 +158,14 @@ stream (accumulators are preserved).
 | `yolov8n-plate.pt` + `_openvino_model/`      | LPR stage 1: locate plate boxes inside a vehicle crop.                   | [Koushim/yolov8-license-plate-detection](https://huggingface.co/Koushim/yolov8-license-plate-detection) (MIT). Convert with the same `export(format="openvino")` call. |
 | `plate_ocr_global.onnx`                      | LPR stage 2: Latin OCR (digits + A-Z, 9 slots).                          | [fast-plate-ocr `cct_xs_relu_v1_global`](https://github.com/ankandrew/fast-plate-ocr) (MIT). |
 | `yolov8n-pose.pt` + `_openvino_model/`       | Top-down COCO-17 keypoints on person crops.                              | Auto-downloaded on first `YOLO("yolov8n-pose.pt")` call by `ultralytics`. |
-| `models/FSRCNN_x4.pb`                        | 4x super-resolution applied to small plate / vehicle crops before OCR.   | [Saafke/FSRCNN Tensorflow](https://github.com/Saafke/FSRCNN_Tensorflow) — grab `FSRCNN_x4.pb` (Apache-2.0). |
+| `models/FSRCNN_x4.pb`                        | 4x super-resolution applied to small plate / vehicle crops before OCR.   | [Saafke/FSRCNN Tensorflow](https://github.com/Saafke/FSRCNN_Tensorflow) - grab `FSRCNN_x4.pb` (Apache-2.0). |
 | `src/data/face_detection_yunet_2023mar.onnx` | YuNet face detector (bounding boxes only).                               | [opencv/opencv_zoo `face_detection_yunet_2023mar.onnx`](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet). |
-| `src/data/osnet_x0_25_msmt17.onnx`           | OSNet re-identification embedding (falls back to HSV histogram if absent). | [KaiyangZhou/deep-person-reid](https://github.com/KaiyangZhou/deep-person-reid) — export `osnet_x0_25` to ONNX. |
+| `src/data/osnet_x0_25_msmt17.onnx`           | OSNet re-identification embedding (falls back to HSV histogram if absent). | [KaiyangZhou/deep-person-reid](https://github.com/KaiyangZhou/deep-person-reid) - export `osnet_x0_25` to ONNX. |
 
 Weights are **not** committed to the repository (see `.gitignore`).
 The notebook's setup cell (`real_time_cv.ipynb`, section 0) fetches
 every weight above on its first run alongside the Python dependency
-check — nothing manual, nothing shipped, everything lands on the
+check - nothing manual, nothing shipped, everything lands on the
 machine running the notebook. The table's "Where to get
 it" column is the fallback for standalone dashboard runs
 (`python serve.py` without ever opening the notebook) or for any URL
@@ -175,7 +175,7 @@ Japanese) is enabled by installing `easyocr` and setting
 
 OSNet Re-ID ONNX is the only weight the notebook does not auto-fetch
 (no permissive public URL exists as a single file). The Re-ID layer
-falls back to an HSV colour histogram in its absence — the default
+falls back to an HSV colour histogram in its absence - the default
 already-working behaviour.
 
 ## Notebook

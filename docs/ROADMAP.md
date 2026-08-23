@@ -1,4 +1,4 @@
-# Real-Time CV YOLO26 — Technical Roadmap
+# Real-Time CV YOLO26 - Technical Roadmap
 
 Source: multi-agent CV/YOLO research pass (2026-08-17). Eight parallel
 research strands scanned leading channels (OpenViewer, AI Dev Guy, Mohsin
@@ -14,7 +14,7 @@ concrete delta it delivers.
 ## Table of contents
 
 - [How to read each entry](#how-to-read-each-entry)
-- [Top 3 next moves — highest ROI](#top-3-next-moves--highest-roi)
+- [Top 3 next moves - highest ROI](#top-3-next-moves--highest-roi)
 - [Quick wins (hours)](#quick-wins-hours)
 - [Medium features (days)](#medium-features-days)
 - [Larger initiatives (weeks+)](#larger-initiatives-weeks)
@@ -27,7 +27,7 @@ concrete delta it delivers.
 | Field | Meaning |
 |---|---|
 | **What** | One-line description of the feature |
-| **Contribution** | The concrete delta vs today's pipeline — what an operator gains |
+| **Contribution** | The concrete delta vs today's pipeline - what an operator gains |
 | **Where** | Existing file to touch OR new module to add |
 | **How** | Implementation sketch + code example |
 | **Delta** | before → after in one line |
@@ -35,21 +35,21 @@ concrete delta it delivers.
 | **Deps** | pip packages / weights / external services |
 | **Status** | ⬜ not started · 🟡 partial (some scaffolding exists) · ✅ done in-tree |
 
-## Top 3 next moves — highest ROI
+## Top 3 next moves - highest ROI
 
-1. **Move 1 — foundation fixes** (≈2 days): Q1 + Q3 + Q7. Replace the
+1. **Move 1 - foundation fixes** (≈2 days): Q1 + Q3 + Q7. Replace the
    homegrown `BurstTracker` with Ultralytics `model.track(persist=True)`,
    quantize YOLO26 to INT8 with NNCF, add a capability chip that shows
    which OpenVINO device/precision is actually running. Doubles baseline
    FPS on i5-class hardware and stabilises track IDs across all 10
    layers.
-2. **Move 2 — viewer → product** (≈2 weeks): M5 + M6 + Q9. Alert bus
+2. **Move 2 - viewer → product** (≈2 weeks): M5 + M6 + Q9. Alert bus
    over SSE, auto-clip recorder that persists a 15 s clip on any flagged
    event, PolygonZone editor with named zone counters. Closes the loop
-   `zone-defined → event fired → clip saved → phone notified` — the
+   `zone-defined → event fired → clip saved → phone notified` - the
    feature set Ambient/Verkada charge $$$ for, built on primitives
    already in the tree.
-3. **Move 3 — skills velocity** (≈1 month): L1 + M3 + M10. YAML-driven
+3. **Move 3 - skills velocity** (≈1 month): L1 + M3 + M10. YAML-driven
    "skills" loader (drop in a new YOLO checkpoint + a manifest, get a
    new dashboard layer), close out the fire/smoke layer (~80 % wired),
    YOLOE-26 open-vocab "Ask" layer (`model.set_classes([...])` free-text
@@ -62,10 +62,10 @@ concrete delta it delivers.
 
 ## Q1. BoT-SORT native tracker
 
-**What** — Replace `src/app/tracker.py` (BurstTracker) with Ultralytics'
+**What** - Replace `src/app/tracker.py` (BurstTracker) with Ultralytics'
 built-in `model.track(persist=True, tracker='botsort.yaml')`.
 
-**Contribution** — Today's tracker matches purely on position + velocity
+**Contribution** - Today's tracker matches purely on position + velocity
 (deliberately, to avoid appearance mismatch on look-alikes). BoT-SORT
 adds a lightweight Kalman filter + optional ReID head and is
 industry-standard on MOT20 / DanceTrack. Every layer that reads
@@ -73,7 +73,7 @@ industry-standard on MOT20 / DanceTrack. Every layer that reads
 immediately: ID-switches on crowded scenes drop measurably, no per-layer
 code change needed.
 
-**Where** — `src/app/detect_core.py` (inference call), `src/app/tracker.py`
+**Where** - `src/app/detect_core.py` (inference call), `src/app/tracker.py`
 (deprecate but keep as fallback for the notebook's dwell burst).
 
 **How**
@@ -118,35 +118,35 @@ gmc_method: sparseOptFlow
 with_reid: false          # flip to true after Q1+M1 (SOLIDER)
 ```
 
-**Delta** — Homegrown position tracker → industry standard. Track ID
+**Delta** - Homegrown position tracker → industry standard. Track ID
 stability across occlusion improves markedly on crowded street scenes.
 
-**Effort** — ~4 h (swap + regression test the 10 layers). **Deps** —
-none new (bundled with `ultralytics>=8.4`). **Status** — ⬜
+**Effort** - ~4 h (swap + regression test the 10 layers). **Deps** -
+none new (bundled with `ultralytics>=8.4`). **Status** - ⬜
 
 ---
 
 ## Q2. Foot-point + directional line counters
 
-**Status** — ✅ Already in-tree. `update_crossings` in
+**Status** - ✅ Already in-tree. `update_crossings` in
 `src/app/live_analysis.py` uses foot-point `(x, y2)` and splits IN/OUT
 via a signed cross-product against the line vector. The top-center
-`IN N / OUT N` HUD already renders. No work required — flagged here
+`IN N / OUT N` HUD already renders. No work required - flagged here
 for completeness against the research doc.
 
 ---
 
 ## Q3. INT8 OpenVINO PTQ for YOLO26
 
-**What** — Post-training-quantize the FP16 OpenVINO IR to INT8 with
+**What** - Post-training-quantize the FP16 OpenVINO IR to INT8 with
 NNCF. Auto-select the INT8 IR when `YOLO26_INT8=1` env is set.
 
-**Contribution** — Current baseline: yolo26m on OpenVINO CPU ≈ 220 ms/frame
+**Contribution** - Current baseline: yolo26m on OpenVINO CPU ≈ 220 ms/frame
 on Intel UHD 620 class. INT8 typically halves latency and reduces RAM by
 ~4×. This is the single-highest-ROI move on CPU-only baselines because
 YOLO inference is 90 %+ of the tick budget.
 
-**Where** — new `src/tools/quantize_openvino.py`; loader in
+**Where** - new `src/tools/quantize_openvino.py`; loader in
 `src/app/detect_core.py:load_model`.
 
 **How**
@@ -157,14 +157,14 @@ import cv2, nncf
 from pathlib import Path
 from ultralytics import YOLO
 
-# 1. Export FP16 IR (idempotent — skip if already present).
+# 1. Export FP16 IR (idempotent - skip if already present).
 weights = "yolo26m.pt"
 YOLO(weights).export(format="openvino", half=True)
 fp_dir  = Path("yolo26m_openvino_model")
 xml_fp  = fp_dir / "yolo26m.xml"
 xml_int8 = fp_dir / "yolo26m.int8.xml"
 
-# 2. Calibration dataset — ~200 frames from data/heatmap_cache or
+# 2. Calibration dataset - ~200 frames from data/heatmap_cache or
 #    a stashed sample directory. Doesn't need labels.
 def calib_gen():
     for p in sorted(Path("src/data/calibration").glob("*.jpg"))[:200]:
@@ -192,27 +192,27 @@ def load_model(weights: str):
     return YOLO(weights)
 ```
 
-**Delta** — 220 ms/frame FP16 → ~110 ms/frame INT8 on same CPU. Frees
+**Delta** - 220 ms/frame FP16 → ~110 ms/frame INT8 on same CPU. Frees
 half the budget for additional layers.
 
-**Effort** — 1 day incl. accuracy A/B on Section 10 fixtures. **Deps** —
+**Effort** - 1 day incl. accuracy A/B on Section 10 fixtures. **Deps** -
 `pip install nncf openvino` (openvino already transitively required).
-**Status** — ⬜
+**Status** - ⬜
 
 ---
 
 ## Q4. Fall detection on the pose layer
 
-**What** — State-machine that flags a "fall" event when a tracked
+**What** - State-machine that flags a "fall" event when a tracked
 person's torso rotates past 60° AND the hip drops by ≥40 % of the
 snapshot torso length within 0.7 s AND stays down for 2 s.
 
-**Contribution** — Turns the already-rendering pose keypoints (COCO-17)
+**Contribution** - Turns the already-rendering pose keypoints (COCO-17)
 into an actionable safety alert. Slots into the same red banner +
 "#TID FALL" HUD the body-anomaly layer already uses. Demo-strong on
 CCTV footage; no new model download.
 
-**Where** — new `src/app/fall.py` consumed from `_render` in
+**Where** - new `src/app/fall.py` consumed from `_render` in
 `live_analysis.py` when `layer == "body"` AND `pose` results present.
 
 **How**
@@ -266,7 +266,7 @@ def check(tid: int, kps, now: float) -> bool:
 ```
 
 ```python
-# live_analysis.py — inside _render for layer == "body"
+# live_analysis.py - inside _render for layer == "body"
 from app.fall import check as _fall_check
 sudden = set()
 for tr in visible:
@@ -276,31 +276,31 @@ for tr in visible:
         self._emit_event("body", f"FALL detected on #{tr.tid}", tr.boxes[-1])
 ```
 
-**Delta** — pose skeletons drawn but silent → skeletons + red "FALL"
+**Delta** - pose skeletons drawn but silent → skeletons + red "FALL"
 banner + JSON event that flows through the alert bus (once M5 lands).
 
-**Effort** — 4-6 h incl. false-positive tuning. **Deps** — none new
-(pose model already auto-downloads). **Status** — ⬜
+**Effort** - 4-6 h incl. false-positive tuning. **Deps** - none new
+(pose model already auto-downloads). **Status** - ⬜
 
 ---
 
 ## Q5. Premium HUD sidebar
 
-**What** — Semi-transparent dark rectangle in the top-left corner of the
+**What** - Semi-transparent dark rectangle in the top-left corner of the
 canvas overlay with rows of KPI ticks (People, FPS, Alerts, Camera,
 Model, Uptime).
 
-**Contribution** — The single most impactful visual polish move — every
+**Contribution** - The single most impactful visual polish move - every
 viral CV reel (Mohsin Ali PPE, OpenViewer wildfire) uses this pattern.
 Turns raw detection into a demo-worthy shot without changing a single
 inference path.
 
-**Where** — pure frontend: `src/web/app.js` canvas overlay.
+**Where** - pure frontend: `src/web/app.js` canvas overlay.
 
 **How**
 
 ```js
-// src/web/app.js — inside the render loop
+// src/web/app.js - inside the render loop
 function drawHUD(ctx, w, h, d) {
   const rows = [
     ["People",  d.person || 0],
@@ -333,31 +333,31 @@ function drawHUD(ctx, w, h, d) {
 Toggle via a header button (`HUD [on|off]`). Persist choice in
 `localStorage`.
 
-**Delta** — Bare video + boxes → CCTV-command-center aesthetic without
+**Delta** - Bare video + boxes → CCTV-command-center aesthetic without
 touching detection at all.
 
-**Effort** — 2-3 h. **Deps** — none. **Status** — ⬜
+**Effort** - 2-3 h. **Deps** - none. **Status** - ⬜
 
 ---
 
 ## Q6. `/api/events.jsonl` sink + `/api/export.csv`
 
-**What** — Append-only JSONL log of every emitted event
+**What** - Append-only JSONL log of every emitted event
 (`_emit_event` call site) + a CSV export endpoint with `?from=&to=&layer=`
 filtering.
 
-**Contribution** — Today every event dies with the session. This makes
-the dashboard the front door of a real evidence pipeline — operator
+**Contribution** - Today every event dies with the session. This makes
+the dashboard the front door of a real evidence pipeline - operator
 "exports the last hour" and hands the CSV to their manager. Prerequisite
 for M6 (auto-clip).
 
-**Where** — `src/app/live_analysis.py:_emit_event` (add file append);
+**Where** - `src/app/live_analysis.py:_emit_event` (add file append);
 `src/app/dashboard_server.py` (new route).
 
 **How**
 
 ```python
-# live_analysis.py — extend _emit_event
+# live_analysis.py - extend _emit_event
 _EVENTS_LOG = Path("src/data/events.jsonl")
 
 def _emit_event(self, layer, msg, box=None):
@@ -368,7 +368,7 @@ def _emit_event(self, layer, msg, box=None):
         _EVENTS_LOG.parent.mkdir(parents=True, exist_ok=True)
         with _EVENTS_LOG.open("a") as f:
             f.write(json.dumps(ev, default=str) + "\n")
-        # rolling size cap — trim if > 10 MB
+        # rolling size cap - trim if > 10 MB
         if _EVENTS_LOG.stat().st_size > 10_000_000:
             lines = _EVENTS_LOG.read_text().splitlines()[-50_000:]
             _EVENTS_LOG.write_text("\n".join(lines) + "\n")
@@ -399,27 +399,27 @@ if path == "/api/export.csv":
     return
 ```
 
-**Delta** — Events die with the session → events survive across
+**Delta** - Events die with the session → events survive across
 restarts and can be handed off as a CSV artifact.
 
-**Effort** — 3-4 h. **Deps** — none. **Status** — ⬜
+**Effort** - 3-4 h. **Deps** - none. **Status** - ⬜
 
 ---
 
 ## Q7. Startup backend selector + capability chip
 
-**What** — On serve.py boot, probe `openvino.Core().available_devices`,
+**What** - On serve.py boot, probe `openvino.Core().available_devices`,
 warm up 20 frames on each, pick the fastest that fits in RAM, cache
 choice in `~/.yolo26_pref.json`. Publish `{device, precision,
 ms_per_frame}` to a `/api/system` endpoint that renders a small chip in
 the dashboard header.
 
-**Contribution** — Today the operator has no idea if inference is
+**Contribution** - Today the operator has no idea if inference is
 running on GPU/NPU/CPU. The chip settles the biggest silent perf
 mystery: "is it fast because it's on my iGPU or slow because it's on
 CPU?".
 
-**Where** — `src/app/detect_core.py:load_model`,
+**Where** - `src/app/detect_core.py:load_model`,
 `src/app/dashboard_server.py` (new route), `src/web/index.html` (chip).
 
 **How**
@@ -449,48 +449,48 @@ def select_backend(weights="yolo26m.pt"):
     return best
 ```
 
-**Delta** — Silent inference → visible chip like
+**Delta** - Silent inference → visible chip like
 `OpenVINO/CPU · FP16 · 220 ms/frame` in dashboard header.
 
-**Effort** — 4-6 h. **Deps** — `openvino` (already required for the IR
-cache). **Status** — ⬜
+**Effort** - 4-6 h. **Deps** - `openvino` (already required for the IR
+cache). **Status** - ⬜
 
 ---
 
 ## Q8. LPR OCR robustness
 
-**Status** — 🟡 Partially in-tree already:
+**Status** - 🟡 Partially in-tree already:
 - Per-track cache exists (a plate reads once per track).
 - Vehicle-width gate exists (`MIN_VEHICLE_W = 60`, `MIN_VEHICLE_W_MOTO = 40`).
 - YouTube-blanket skip removed 2026-08-17 (`b9b5176`).
 
-**Remaining work** — Frame-skip (`PLATES_OCR_EVERY_N=5`) + confidence
+**Remaining work** - Frame-skip (`PLATES_OCR_EVERY_N=5`) + confidence
 gate on candidate reads (`conf<0.6 or len<4 → reject`). See M9 for the
 GDPR-safe persistence layer.
 
-**Effort** — 2 h. **Deps** — none. **Status** — 🟡
+**Effort** - 2 h. **Deps** - none. **Status** - 🟡
 
 ---
 
 ## Q9. PolygonZone editor
 
-**What** — Frontend polygon editor on the live canvas (click to place
+**What** - Frontend polygon editor on the live canvas (click to place
 vertices, double-click to close). POST to `/api/zones`, persist to
 `data/zones/<cam>.json`.
 
-**Contribution** — Today's zones (loiter, parking) are configured by
+**Contribution** - Today's zones (loiter, parking) are configured by
 hand-editing JSON. An in-canvas editor turns zone setup from
 5-minutes-of-console-work into 10-seconds-of-clicks. Prerequisite for
 M7 (density per zone) and L4 (rules catalog).
 
-**Where** — `src/web/app.js` (editor UI) + `src/app/dashboard_server.py`
+**Where** - `src/web/app.js` (editor UI) + `src/app/dashboard_server.py`
 (POST /api/zones already partly wired via `save_zones` in cameras.py).
 
-**How** — Backend already exposes `save_zones` and `resolve_zones`. The
+**How** - Backend already exposes `save_zones` and `resolve_zones`. The
 missing piece is the JS editor:
 
 ```js
-// src/web/app.js — polygon editor
+// src/web/app.js - polygon editor
 let drawState = { active: false, pts: [], zone_kind: "loiter" };
 canvas.addEventListener("click", (e) => {
   if (!drawState.active) return;
@@ -513,24 +513,24 @@ canvas.addEventListener("dblclick", async () => {
 });
 ```
 
-**Delta** — JSON hand-edit → live click-to-draw with immediate takeup
+**Delta** - JSON hand-edit → live click-to-draw with immediate takeup
 by the analysis loop.
 
-**Effort** — 6-8 h. **Deps** — none. **Status** — 🟡 (backend done,
+**Effort** - 6-8 h. **Deps** - none. **Status** - 🟡 (backend done,
 frontend editor missing).
 
 ---
 
 ## Q10. Boot smoke test + dependency check
 
-**What** — `tests/test_smoke_boot.py` that imports every module under
+**What** - `tests/test_smoke_boot.py` that imports every module under
 `src/app/`, parses `src/requirements.txt`, and runs the app factory
 against a 640×360 black stub frame.
 
-**Contribution** — Catches import breakage / signature drift on every
+**Contribution** - Catches import breakage / signature drift on every
 CI run. Zero runtime cost.
 
-**Where** — `src/tests/test_smoke_boot.py`.
+**Where** - `src/tests/test_smoke_boot.py`.
 
 **How**
 
@@ -551,11 +551,11 @@ def test_load_model_on_stub_frame():
     assert set(counts) >= {"person", "vehicles"}
 ```
 
-**Delta** — Silent import breakage → CI red-light on first commit that
+**Delta** - Silent import breakage → CI red-light on first commit that
 breaks the API surface.
 
-**Effort** — 2 h. **Deps** — `pytest` (already in dev tree).
-**Status** — ⬜
+**Effort** - 2 h. **Deps** - `pytest` (already in dev tree).
+**Status** - ⬜
 
 ---
 
@@ -563,15 +563,15 @@ breaks the API surface.
 
 ## M1. SOLIDER-Swin-Tiny Re-ID
 
-**What** — Replace `osnet_x0_25_msmt17.onnx` with SOLIDER-Swin-Tiny
+**What** - Replace `osnet_x0_25_msmt17.onnx` with SOLIDER-Swin-Tiny
 (Apache-2.0, ~15 MB INT8) as the Re-ID backbone.
 
-**Contribution** — Current OSNet-x0_25 is the WEAKEST checkpoint of an
+**Contribution** - Current OSNet-x0_25 is the WEAKEST checkpoint of an
 older backbone (2019). SOLIDER-Swin-Tiny (2023) is +8-12 % Rank-1 on
 MSMT17 at similar cost. Direct win for the notebook's Section 5b
 "unique visitors" counter and any future FAISS gallery (M2).
 
-**Where** — new class `SoliderEmbedder` in `src/app/reid_embed.py`
+**Where** - new class `SoliderEmbedder` in `src/app/reid_embed.py`
 alongside the existing OSNet embedder; select via
 `REID_BACKBONE=solider_swin_t` env var.
 
@@ -596,24 +596,24 @@ class SoliderEmbedder:
         return out / (np.linalg.norm(out) + 1e-9)
 ```
 
-**Delta** — Rank-1 ~62 % (OSNet) → ~74 % (SOLIDER) on MSMT17, same CPU
-budget. **Effort** — 1-2 d. **Deps** — `onnxruntime` + SOLIDER ONNX
-export. **Status** — ⬜
+**Delta** - Rank-1 ~62 % (OSNet) → ~74 % (SOLIDER) on MSMT17, same CPU
+budget. **Effort** - 1-2 d. **Deps** - `onnxruntime` + SOLIDER ONNX
+export. **Status** - ⬜
 
 ---
 
 ## M2. FAISS gallery for returning visitors
 
-**What** — On track birth, compute the Re-ID embedding + cosine-search a
+**What** - On track birth, compute the Re-ID embedding + cosine-search a
 FAISS index. Match > 0.75 → reuse existing `person_uid` (EMA-update the
 stored vector); else insert. Persist to `data/reid.sqlite`.
 
-**Contribution** — Answers "how many UNIQUE customers walked past
+**Contribution** - Answers "how many UNIQUE customers walked past
 today?" across days, not just per-session. The infrastructure the
 notebook already has (Section 5b re-ID) becomes a persistent visitor
 identity service.
 
-**Where** — extend `src/app/reid.py` with a `FaissGallery` class;
+**Where** - extend `src/app/reid.py` with a `FaissGallery` class;
 new endpoint `GET /api/reid/gallery-stats`.
 
 **How**
@@ -654,41 +654,41 @@ class FaissGallery:
         return cur.lastrowid, True
 ```
 
-**Delta** — Per-session identities → cross-session persistent IDs with
-sightings + first/last-seen. **Effort** — 2-3 d. **Deps** — `faiss-cpu`
-(~2 MB). **Status** — ⬜
+**Delta** - Per-session identities → cross-session persistent IDs with
+sightings + first/last-seen. **Effort** - 2-3 d. **Deps** - `faiss-cpu`
+(~2 MB). **Status** - ⬜
 
 ---
 
 ## M3. Fire / smoke layer completion
 
-**Status** — 🟡 80 % wired already. `_fire_pass`, `FIRE_MODEL_PATH`,
+**Status** - 🟡 80 % wired already. `_fire_pass`, `FIRE_MODEL_PATH`,
 `FIRE_CONFIRM_TICKS = 2` and `draw_fire_layer` all exist in
 `live_analysis.py`. Missing: the weights file.
 
-**Remaining work** — Fetch a permissive-license fire/smoke detector
+**Remaining work** - Fetch a permissive-license fire/smoke detector
 (FIgLib-trained, or Roboflow smoke checkpoint), OpenVINO-convert, wire
 the download into the notebook setup cell (like the LPR weights).
 
-**Effort** — 4-6 h once the weights source is settled. **Status** — 🟡
+**Effort** - 4-6 h once the weights source is settled. **Status** - 🟡
 
 ---
 
 ## M4. PPE compliance layer
 
-**What** — 11th detection layer: run a construction-safety YOLO (~50 MB,
+**What** - 11th detection layer: run a construction-safety YOLO (~50 MB,
 10 classes: hat, vest, gloves, mask, etc.) on person crops. Match hat/
 vest boxes back to `track_id` via IoU. Render per-person `OK` / `NF`
 badge next to the pose skeleton and a KPI in the HUD.
 
-**Contribution** — The single most-common viral demo in the Mohsin Ali /
+**Contribution** - The single most-common viral demo in the Mohsin Ali /
 OpenViewer content niche. Direct pitch for construction/warehouse
 operators.
 
-**Where** — new `src/app/ppe.py` (mirrors the two-stage pattern of
+**Where** - new `src/app/ppe.py` (mirrors the two-stage pattern of
 `plates.py`); layer entry in `live_analysis.py:LIVE_LAYERS`.
 
-**How** — Two-stage exactly like plates: outer YOLO26 finds `person`
+**How** - Two-stage exactly like plates: outer YOLO26 finds `person`
 boxes; inner PPE YOLO runs on each person crop; IoU-associate each PPE
 class to the person; render badge.
 
@@ -708,23 +708,23 @@ def attach_ppe(person_boxes, frame, ppe_model, min_conf=0.35):
         pb["ppe_ok"] = all(pb["ppe"].values())
 ```
 
-**Delta** — Empty operator gap → construction-vertical demo the moment
-weights land. **Effort** — 2-3 d. **Deps** — Roboflow construction-safety
-weights + `PPE_MODEL_PATH` env. **Status** — ⬜
+**Delta** - Empty operator gap → construction-vertical demo the moment
+weights land. **Effort** - 2-3 d. **Deps** - Roboflow construction-safety
+weights + `PPE_MODEL_PATH` env. **Status** - ⬜
 
 ---
 
 ## M5. Detection → Rule → Alert bus (SSE + ntfy)
 
-**What** — Central event bus. Every `_emit_event` push goes into a
+**What** - Central event bus. Every `_emit_event` push goes into a
 ring-buffered `Event` dataclass, streamed over `/api/events` (SSE) and
 optionally POSTed to `ntfy.sh` for phone push.
 
-**Contribution** — The wire that connects everything else — plate
+**Contribution** - The wire that connects everything else - plate
 match, fall, PPE violation, zone entry all become "events" the operator
 subscribes to (or forwards to their phone).
 
-**Where** — new `src/app/alerts.py`; new `/api/events` SSE endpoint in
+**Where** - new `src/app/alerts.py`; new `/api/events` SSE endpoint in
 `dashboard_server.py`; hot-reloadable rules in
 `src/data/alert_rules.json`.
 
@@ -770,7 +770,7 @@ class AlertBus:
 ```
 
 ```python
-# dashboard_server.py — SSE stream
+# dashboard_server.py - SSE stream
 if path == "/api/events":
     self.send_response(200)
     self.send_header("Content-Type", "text/event-stream")
@@ -788,26 +788,26 @@ if path == "/api/events":
     return
 ```
 
-**Delta** — In-memory events lost on session end → cross-session,
+**Delta** - In-memory events lost on session end → cross-session,
 push-notifiable event stream.
 
-**Effort** — 3-4 d. **Deps** — none (SSE is stdlib). ⚠️
+**Effort** - 3-4 d. **Deps** - none (SSE is stdlib). ⚠️
 Privacy: run YuNet face-blur on any snapshot before POSTing to ntfy.
-**Status** — ⬜
+**Status** - ⬜
 
 ---
 
 ## M6. Auto-clip recorder
 
-**What** — 15 s pre-event rolling buffer of annotated frames. On any
+**What** - 15 s pre-event rolling buffer of annotated frames. On any
 alert-bus event, drain the buffer + record 5 s post → mp4v file under
 `src/web/snapshots/clips/`. `/api/clips` lists them with thumbnails.
 
-**Contribution** — Turns any live alert into forensic evidence with
+**Contribution** - Turns any live alert into forensic evidence with
 provenance. The single feature the operator asked about most in the
 research pass.
 
-**Where** — new `src/app/clip_recorder.py`, hooked to the alert bus M5.
+**Where** - new `src/app/clip_recorder.py`, hooked to the alert bus M5.
 
 **How**
 
@@ -851,41 +851,41 @@ class ClipRecorder:
         (self.dir / f"{stem}.sha256").write_text(sha)
 ```
 
-**Delta** — Screen-only alerts → mp4 clips + SHA-256 provenance sidecar
-that can be handed to authorities. **Effort** — 2-3 d. **Deps** — none
-(cv2 already required). **Status** — ⬜
+**Delta** - Screen-only alerts → mp4 clips + SHA-256 provenance sidecar
+that can be handed to authorities. **Effort** - 2-3 d. **Deps** - none
+(cv2 already required). **Status** - ⬜
 
 ---
 
 ## M7. Zone-scoped density + queue wait-time
 
-**What** — For each zone (Q9), publish `{count, median_dwell_s,
+**What** - For each zone (Q9), publish `{count, median_dwell_s,
 rolling_60s_median}`. Chart.js sparkline in dashboard sidebar.
 
-**Contribution** — Direct queue-analytics parity with Bosch / Verkada /
+**Contribution** - Direct queue-analytics parity with Bosch / Verkada /
 Actuate marketing pages. Reuses zone + presence code already in
 `src/app/presence.py` and `src/app/live_analysis.py`.
 
-**Where** — new `src/app/density.py`; new endpoint `/api/density`;
+**Where** - new `src/app/density.py`; new endpoint `/api/density`;
 Chart.js sparkline in dashboard.
 
-**Delta** — Zone events flip only (occupied/vacant) → per-zone density
-+ wait-time time-series. **Effort** — 2-3 d (depends on Q1 + Q9).
-**Deps** — none. **Status** — ⬜
+**Delta** - Zone events flip only (occupied/vacant) → per-zone density
++ wait-time time-series. **Effort** - 2-3 d (depends on Q1 + Q9).
+**Deps** - none. **Status** - ⬜
 
 ---
 
 ## M8. Plate super-res: FSRCNN → SwinIR-lite (feature-flagged)
 
-**What** — Add `SwinIR-lite` as an alternative super-res backend behind
+**What** - Add `SwinIR-lite` as an alternative super-res backend behind
 `PLATE_SR=swinir|fsrcnn|off`. Default stays `fsrcnn` until A/B on a
 fixed 30-plate fixture shows the swap is worth it.
 
-**Contribution** — SwinIR generally beats FSRCNN by 1-2 dB PSNR on
+**Contribution** - SwinIR generally beats FSRCNN by 1-2 dB PSNR on
 plate crops; the difference is often the boundary between "unreadable
 blur" and "8-of-9 characters correct".
 
-**Where** — `src/app/plates.py:_upscale_for_ocr` — add a backend switch.
+**Where** - `src/app/plates.py:_upscale_for_ocr` - add a backend switch.
 
 **How**
 
@@ -900,24 +900,24 @@ def _upscale_for_ocr(plate_bgr):
     return _fsrcnn_upscale(plate_bgr)       # legacy default
 ```
 
-**Delta** — FSRCNN-only → pluggable SR backends with a documented A/B
-harness. **Effort** — 2 d + 1 d benchmark. **Deps** — SwinIR-lite ONNX
-(~10 MB) + `openvino`. **Status** — ⬜
+**Delta** - FSRCNN-only → pluggable SR backends with a documented A/B
+harness. **Effort** - 2 d + 1 d benchmark. **Deps** - SwinIR-lite ONNX
+(~10 MB) + `openvino`. **Status** - ⬜
 
 ---
 
 ## M9. HMAC-hashed plate persistence (GDPR-safe)
 
-**What** — Never persist a plate string in plaintext. Store
+**What** - Never persist a plate string in plaintext. Store
 `(hmac_sha256(plate, key), first_seen, last_seen, count, vehicle_class)`.
 Key at `src/data/.plate_key` (chmod 600, gitignored).
 
-**Contribution** — Plate persistence today is off-by-default because it's
-a compliance grenade. HMAC makes it safe to persist — you can still count
+**Contribution** - Plate persistence today is off-by-default because it's
+a compliance grenade. HMAC makes it safe to persist - you can still count
 unique plates, detect "same plate returning", but the plain text never
 touches disk.
 
-**Where** — `src/app/plates.py` — extend the read-cache with a persist
+**Where** - `src/app/plates.py` - extend the read-cache with a persist
 step through an HMAC helper.
 
 **How**
@@ -939,23 +939,23 @@ def hash_plate(plate: str) -> str:
     return hmac.new(_key(), plate.encode(), hashlib.sha256).hexdigest()
 ```
 
-**Delta** — No persistence (compliance risk) → GDPR/KVKK-safe unique-plate
-counter. **Effort** — 1-2 d. **Deps** — none. **Status** — ⬜
+**Delta** - No persistence (compliance risk) → GDPR/KVKK-safe unique-plate
+counter. **Effort** - 1-2 d. **Deps** - none. **Status** - ⬜
 
 ---
 
 ## M10. YOLOE-26 open-vocabulary "Ask" layer
 
-**What** — New 11th layer that accepts a free-text list of prompts:
+**What** - New 11th layer that accepts a free-text list of prompts:
 "red backpack, cigarette, smoke, delivery van, person with umbrella".
 `model.set_classes(prompts)` sets the label vocabulary; detections then
 flow through the same overlay path.
 
-**Contribution** — Closes fire + smoking + arbitrary-prompt gaps in
+**Contribution** - Closes fire + smoking + arbitrary-prompt gaps in
 ONE model download instead of one weight per category. Direct answer to
 "can it detect X?" without training.
 
-**Where** — new `src/app/askvocab.py`; layer entry in `LIVE_LAYERS`;
+**Where** - new `src/app/askvocab.py`; layer entry in `LIVE_LAYERS`;
 `POST /api/prompt` in `dashboard_server.py`.
 
 **How**
@@ -977,25 +977,25 @@ def detect_by_prompt(frame, prompts):
     return _to_boxes(r)
 ```
 
-**Delta** — Fixed 80 COCO classes → operator types "cigarette, backpack"
-and sees live detections. **Effort** — 3-4 d. **Deps** — YOLOE-11s-seg
-weights (~40 MB), Ultralytics ≥ 8.4. **Status** — ⬜
+**Delta** - Fixed 80 COCO classes → operator types "cigarette, backpack"
+and sees live detections. **Effort** - 3-4 d. **Deps** - YOLOE-11s-seg
+weights (~40 MB), Ultralytics ≥ 8.4. **Status** - ⬜
 
 ---
 
 ## M11. "Attention" chip per person (neutral labeling)
 
-**What** — Fuse loiter dwell + gesture flags + path curvature into a
+**What** - Fuse loiter dwell + gesture flags + path curvature into a
 per-person score in `[0, 1]`. Render a floating chip above the box
 labelled `Attention 0.72` with hover-tooltip listing the reasons.
 
-**Contribution** — Direct match for the AI-Dev-Guy "Normal / Suspicious"
-viral pattern — but with **neutral wording** (`Attention`, not
+**Contribution** - Direct match for the AI-Dev-Guy "Normal / Suspicious"
+viral pattern - but with **neutral wording** (`Attention`, not
 `Suspicious`) to avoid false-positive branding of real individuals.
 
-**Where** — `src/app/behavior.py` + frontend chip in `app.js`.
+**Where** - `src/app/behavior.py` + frontend chip in `app.js`.
 
-**How** — Score formula runs on the existing behaviour signals:
+**How** - Score formula runs on the existing behaviour signals:
 
 ```python
 def attention_score(dwell_s, gesture_count, path_curvature):
@@ -1010,33 +1010,33 @@ def attention_score(dwell_s, gesture_count, path_curvature):
     return {"score": round(score, 2), "reasons": reasons}
 ```
 
-**Delta** — Individual raw signals → a single interpretable per-person
-number the operator can act on. **Effort** — 3-4 d. **Deps** — none.
-**Status** — ⬜
+**Delta** - Individual raw signals → a single interpretable per-person
+number the operator can act on. **Effort** - 3-4 d. **Deps** - none.
+**Status** - ⬜
 
 ---
 
 ## M12. Ground-plane homography → km/h speed
 
-**What** — 4-point calibrator (operator clicks a known rectangle on the
+**What** - 4-point calibrator (operator clicks a known rectangle on the
 street). `cv2.getPerspectiveTransform` gives the pixel→metre mapping.
 Each track's centroid in metres gives real km/h speed instead of
 pixels/sec.
 
-**Contribution** — Turns today's `slow/moving/fast` chip into an actual
+**Contribution** - Turns today's `slow/moving/fast` chip into an actual
 number (with the honest ±20 % accuracy caveat). Match for the AI-Dev-Guy
 speed-cam viral demo.
 
-**Where** — `src/app/speed.py` + a small calibrator dialog in
+**Where** - `src/app/speed.py` + a small calibrator dialog in
 `app.js`.
 
-**How** — `cv2.getPerspectiveTransform([4-image-points], [4-metre-points])`
+**How** - `cv2.getPerspectiveTransform([4-image-points], [4-metre-points])`
 once per camera, persist in `cameras.py`. Then every track's centroid
 maps through the matrix; a 1-second moving average smooths out the
 tracker jitter.
 
-**Delta** — px/s → km/h with per-camera calibration. **Effort** — 2-3 d.
-**Deps** — none. **Status** — ⬜
+**Delta** - px/s → km/h with per-camera calibration. **Effort** - 2-3 d.
+**Deps** - none. **Status** - ⬜
 
 ---
 
@@ -1044,20 +1044,20 @@ tracker jitter.
 
 ## L1. Pluggable "skills" loader
 
-**What** — YAML manifest → dynamic YOLO layer. Drop a checkpoint in
+**What** - YAML manifest → dynamic YOLO layer. Drop a checkpoint in
 `skills/<name>/model.pt` and a manifest with `{classes, colors, notify_on}`
 next to it; a new dropdown entry appears in the dashboard without a
 Python change.
 
-**Contribution** — Reshapes the shipping cadence. Currently every new
+**Contribution** - Reshapes the shipping cadence. Currently every new
 layer = a new Python module (`plates.py`, `faces.py`, ...). With L1, a
 new layer = a directory + YAML. This is exactly how OpenViewer ships a
 new reel per week.
 
-**Where** — new `src/app/skills.py`; per-skill directories under
+**Where** - new `src/app/skills.py`; per-skill directories under
 `skills/`.
 
-**How** — Manifest:
+**How** - Manifest:
 
 ```yaml
 # skills/wildfire_smoke/manifest.yaml
@@ -1073,70 +1073,70 @@ notify_on: ["fire"]
 Loader iterates `skills/*/manifest.yaml` at boot, registers each as an
 optional layer in `LIVE_LAYERS`.
 
-**Delta** — Add-a-layer = 1 day of Python + 1 PR → drop a directory,
-restart, done. **Effort** — 1-2 w. **Deps** — none. **Status** — ⬜
+**Delta** - Add-a-layer = 1 day of Python + 1 PR → drop a directory,
+restart, done. **Effort** - 1-2 w. **Deps** - none. **Status** - ⬜
 
 ---
 
 ## L2. SAM 2 click-to-track promptable mask overlay
 
-**What** — Operator clicks any object in the video → SAM 2 tiny propagates
+**What** - Operator clicks any object in the video → SAM 2 tiny propagates
 a mask + track through subsequent frames. Overlay a coloured mask with
 smoothed contour instead of a bounding box.
 
-**Contribution** — The single most-viral live demo of the 2024-2025
+**Contribution** - The single most-viral live demo of the 2024-2025
 season. Ideal for hands-on demos.
 
-**Where** — new `src/app/sam2.py`; WebSocket channel for click events;
+**Where** - new `src/app/sam2.py`; WebSocket channel for click events;
 frontend click handler in `app.js`.
 
-**Deps** — `sam2_t.pt` (~40 MB); careful memory management on CPU.
-**Effort** — 2-3 w. **Status** — ⬜ (flagship demo, not a critical path).
+**Deps** - `sam2_t.pt` (~40 MB); careful memory management on CPU.
+**Effort** - 2-3 w. **Status** - ⬜ (flagship demo, not a critical path).
 
 ---
 
 ## L3. Split-view multi-source (2 cameras concurrently)
 
-**What** — Lift `MAX_SESSIONS = 1` to 2, 2-column CSS grid,
-per-view id namespace. No cross-camera Re-ID at first — that comes with
+**What** - Lift `MAX_SESSIONS = 1` to 2, 2-column CSS grid,
+per-view id namespace. No cross-camera Re-ID at first - that comes with
 M2 (FAISS gallery).
 
-**Effort** — 1 w. **Deps** — none. Requires ~2× CPU budget so wire it
-behind a config flag. **Status** — ⬜
+**Effort** - 1 w. **Deps** - none. Requires ~2× CPU budget so wire it
+behind a config flag. **Status** - ⬜
 
 ---
 
 ## L4. Rules catalog UI ("30+ signatures")
 
-**What** — Ship 20-30 preset alert rules (`"after-hours perimeter
+**What** - Ship 20-30 preset alert rules (`"after-hours perimeter
 breach"`, `"checkout queue > 4"`, `"PPE violation"`, `"parking spot
 occupied > 30 min"`). Compose them in a UI, save to
 `data/alert_rules.json`, hot-reloaded by M5's alert bus.
 
-**Contribution** — This is the *repackaging* that Ambient / Actuate /
+**Contribution** - This is the *repackaging* that Ambient / Actuate /
 Vaidio charge for. The primitives (line, loiter, parking, PPE, plates)
-already exist — the catalog turns them into "signatures".
+already exist - the catalog turns them into "signatures".
 
-**Effort** — 2 w after L1 + M5. **Deps** — none. **Status** — ⬜
+**Effort** - 2 w after L1 + M5. **Deps** - none. **Status** - ⬜
 
 ---
 
 ## L5. Natural-language track search (CLIP / SigLIP)
 
-**What** — Store a CLIP embedding of the sharpest crop per completed
+**What** - Store a CLIP embedding of the sharpest crop per completed
 track in SQLite. Query the dashboard with `"person in red jacket"` /
 `"white SUV"` → cosine top-K → grid of matching track thumbnails.
 
-**Contribution** — Direct match for Verkada's flagship "AI Search"
-feature — the single most operator-requested capability across the
+**Contribution** - Direct match for Verkada's flagship "AI Search"
+feature - the single most operator-requested capability across the
 enterprise survey.
 
-**Where** — new `src/app/track_search.py`; `POST /api/search`.
+**Where** - new `src/app/track_search.py`; `POST /api/search`.
 
 **How**
 
 ```python
-# track_search.py — using open_clip
+# track_search.py - using open_clip
 import open_clip, torch
 model, _, preprocess = open_clip.create_model_and_transforms(
     "ViT-B-32", pretrained="openai")
@@ -1153,50 +1153,50 @@ def embed_text(query):
         return model.encode_text(tokenizer([query])).squeeze().numpy()
 ```
 
-**Effort** — 2 w. **Deps** — `open_clip_torch` (~150 MB weights).
-**Status** — ⬜
+**Effort** - 2 w. **Deps** - `open_clip_torch` (~150 MB weights).
+**Status** - ⬜
 
 ---
 
 ## L6. Local Ollama VLM narrator (opt-in only)
 
-**What** — Every N minutes, feed the last few flagged events + a couple
+**What** - Every N minutes, feed the last few flagged events + a couple
 of representative frames to a local VLM (SmolVLM-2.2B) that returns a
 one-paragraph summary. Rendered as a banner in the dashboard sidebar.
 
-**Contribution** — Turns raw event lists into human-readable situational
+**Contribution** - Turns raw event lists into human-readable situational
 reports.
 
-**Effort** — 3-4 w after M5. **Deps** — Ollama + SmolVLM (~2.2 GB).
+**Effort** - 3-4 w after M5. **Deps** - Ollama + SmolVLM (~2.2 GB).
 Opt-in only. Explicit "AI-generated, may be inaccurate" badge.
-**Status** — ⬜
+**Status** - ⬜
 
 ---
 
 ## L7. YOLO26-seg masks for path/loiter/parking/heat
 
-**What** — Swap YOLO26 detection weights for `yolo26m-seg.pt`; use the
+**What** - Swap YOLO26 detection weights for `yolo26m-seg.pt`; use the
 segmentation mask contour centroid instead of bbox foot-point.
 
-**Contribution** — Foot-point today biases upward on long silhouettes
+**Contribution** - Foot-point today biases upward on long silhouettes
 (person with a large backpack, someone riding a scooter). Contour
 centroid is exact.
 
-**Effort** — 1 w. **Deps** — `yolo26m-seg.pt` weights (~50 MB).
-**Status** — ⬜
+**Effort** - 1 w. **Deps** - `yolo26m-seg.pt` weights (~50 MB).
+**Status** - ⬜
 
 ---
 
 ## L8. RF-DETR vs YOLO26 A/B benchmark cell
 
-**What** — Add a Section 11 to the notebook that runs `rfdetr-nano`
+**What** - Add a Section 11 to the notebook that runs `rfdetr-nano`
 and `yolo26m` on the same 30 calibration frames, plots MAE and latency
 side by side. Persist to `data/bench_YYYYMMDD.json`.
 
-**Contribution** — Turns model-choice from "trend-following" into a
+**Contribution** - Turns model-choice from "trend-following" into a
 reproducible benchmark documented in the repo.
 
-**Effort** — 3-5 d. **Deps** — `pip install rfdetr`. **Status** — ⬜
+**Effort** - 3-5 d. **Deps** - `pip install rfdetr`. **Status** - ⬜
 
 ---
 
@@ -1207,8 +1207,8 @@ reproducible benchmark documented in the repo.
 | Fire / smoke | OpenViewer, Actuate, Ambient | Skeleton wired, weights missing | **M3** |
 | PPE compliance | Mohsin Ali, Ambient, Vaidio | Not started | **M4** |
 | Fall / collapse | Actuate, Verkada | Keypoints flow, no state machine | **Q4** |
-| Weapon detection | Actuate, Ambient (flagship) | Not started; no permissive weights | *deferred* — needs responsible source |
-| ALPR advanced (make / model) | Vaidio, Bosch, Milestone | Plate text only | *skipped* — better ROI in Q4 / M11 |
+| Weapon detection | Actuate, Ambient (flagship) | Not started; no permissive weights | *deferred* - needs responsible source |
+| ALPR advanced (make / model) | Vaidio, Bosch, Milestone | Plate text only | *skipped* - better ROI in Q4 / M11 |
 | Retail queue + wait-time | Actuate, Bosch, Verkada | Not started | **M7** |
 | AI Search (natural language) | Verkada (flagship), Motorola Avigilon | Not started | **L5** |
 | Appearance-attribute filters | Bosch IVA Pro | Not started | *composed of L5 + Q10-style chips* |
@@ -1236,28 +1236,28 @@ reproducible benchmark documented in the repo.
 
 ## Runtime
 
-- **INT8 PTQ with NNCF** (**Q3**) — the single highest-ROI move on
+- **INT8 PTQ with NNCF** (**Q3**) - the single highest-ROI move on
   CPU-only baselines. ~2× FPS, ~4× RAM.
-- **OpenVINO Core probe + auto-select** (**Q7**) — becomes meaningful
+- **OpenVINO Core probe + auto-select** (**Q7**) - becomes meaningful
   after Q3 (nothing to select between if only one precision exists).
-- **TensorRT** — skip until there's discrete NVIDIA GPU. Zero value on
+- **TensorRT** - skip until there's discrete NVIDIA GPU. Zero value on
   Intel iGPU.
-- **onnxruntime with OpenVINO EP** — already used for the Re-ID head.
+- **onnxruntime with OpenVINO EP** - already used for the Re-ID head.
   Reuse the same pattern for any additional side model.
 
 ## Tracking
 
-- **BoT-SORT native** via `model.track(persist=True)` (**Q1**) — removes
+- **BoT-SORT native** via `model.track(persist=True)` (**Q1**) - removes
   the homegrown tracker from the maintenance surface and stabilises
   every downstream layer.
 
 ## Infrastructure
 
-- **`ultralytics >= 8.4`** — needed for both `model.track` and YOLOE.
-- **Python 3.10+** — already stated as required; yt-dlp dropped 3.9.
-- **`faiss-cpu`** (**M2**) — 2 MB library, worth it for >1k identity
+- **`ultralytics >= 8.4`** - needed for both `model.track` and YOLOE.
+- **Python 3.10+** - already stated as required; yt-dlp dropped 3.9.
+- **`faiss-cpu`** (**M2**) - 2 MB library, worth it for >1k identity
   gallery.
-- **Roboflow `supervision`** — replace hand-rolled `PolygonZone` /
+- **Roboflow `supervision`** - replace hand-rolled `PolygonZone` /
   `LineZone` primitives once M5/L4 arrive.
 
 ---
@@ -1269,20 +1269,20 @@ OpenViewer / AI Dev Guy is entirely **visual polish**, not detection
 quality. These are the shots that push a demo from "developer preview"
 to "product":
 
-1. **Premium HUD sidebar** (**Q5**) — the screenshot-worthy layer.
-2. **Attention chip per person** (**M11**) — pill above box with hover
-   reasons. Must use neutral wording — "Attention", not "Suspicious".
-3. **Auto-clip + evidence export** (**M6** + **Q6**) — turns "seen and
+1. **Premium HUD sidebar** (**Q5**) - the screenshot-worthy layer.
+2. **Attention chip per person** (**M11**) - pill above box with hover
+   reasons. Must use neutral wording - "Attention", not "Suspicious".
+3. **Auto-clip + evidence export** (**M6** + **Q6**) - turns "seen and
    lost" into "here is the mp4 with SHA-256".
-4. **Red pulsing banner + top-bar alert chip** (**M3**, **M5**) —
+4. **Red pulsing banner + top-bar alert chip** (**M3**, **M5**) -
    the OpenViewer / Actuate standard.
-5. **Chart.js sparklines in every KPI tile** (**M7 + Q2**) — looks
+5. **Chart.js sparklines in every KPI tile** (**M7 + Q2**) - looks
    like analytics, not print statements.
-6. **Privacy blur default-on** + `PRIVACY: ON` badge — ethical AND a
+6. **Privacy blur default-on** + `PRIVACY: ON` badge - ethical AND a
    maturity signal for enterprise buyers.
-7. **Notebook Section 11 with A/B chart** (**L8**) — positions the
+7. **Notebook Section 11 with A/B chart** (**L8**) - positions the
    YOLO26 choice as scientific instead of trend-following.
-8. **Skill dropdown in dashboard header** (**L1**) — each new demo
+8. **Skill dropdown in dashboard header** (**L1**) - each new demo
    becomes a chip. Changes the narrative from "another layer" to "new
    plugin in the marketplace".
 

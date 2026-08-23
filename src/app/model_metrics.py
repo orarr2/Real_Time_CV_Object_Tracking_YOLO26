@@ -72,12 +72,14 @@ _REFERENCE_METRICS = {
         "mAP5095": 0.502,
         "params_m": 3.3,
     },
-    "yolov8n-plate.pt": {
-        "dataset": "Koushim/yolov8-license-plate-detection val split",
-        "source":  "huggingface.co/Koushim/yolov8-license-plate-detection",
-        "mAP50":   0.973,
-        "mAP5095": 0.686,
-        "params_m": 3.0,
+    "yolov11s-plate.pt": {
+        # Specialist finetune - the HF card publishes no val-split mAP,
+        # so no number is shown rather than a fabricated one.
+        "dataset": "morsetechlab/yolov11-license-plate-detection",
+        "source":  "huggingface.co/morsetechlab/yolov11-license-plate-detection",
+        "mAP50":   None,
+        "mAP5095": None,
+        "params_m": 9.4,
     },
     "yolo_fire.pt": {
         "dataset": "SHOU-ISD fire-and-smoke val split",
@@ -120,7 +122,7 @@ _MODEL_ROLES = {
     "yolov8s.pt":            ("detection", "general object detection (small)"),
     "yolo26x.pt":            ("detection", "primary detector (YOLO26 X)"),
     "yolov8n-pose.pt":       ("pose", "keypoints for Pose / Gestures / Body layers"),
-    "yolov8n-plate.pt":      ("plates", "license-plate box detector inside a vehicle crop"),
+    "yolov11s-plate.pt":     ("plates", "license-plate box detector inside a vehicle crop"),
     "plate_ocr_global.onnx": ("plates", "license-plate OCR head (Latin + digits)"),
     "ESPCN_x4.pb":           ("plates", "super-res 4x for tiny plate crops"),
     "yolo_fire.pt":          ("fire", "fire + smoke detection layer"),

@@ -1720,7 +1720,7 @@ function _syncAnalysisBgVisibility(st) {
   const a = st.analysis;
   if (!a || !a.bg) return;
 
-  // 2026-08-17: heat is a special case — the colormap is BAKED into the
+  // 2026-08-17: heat is a special case - the colormap is BAKED into the
   // backend JPEG by draw_heat_layer(). Trying to render it on the canvas
   // overlay from JSON on top of the YouTube iframe hits three problems
   // at once: (a) the JSON heat is empty until the backend has accumulated

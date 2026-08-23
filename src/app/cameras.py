@@ -1,12 +1,12 @@
 """Multi-country camera catalog for the single-camera live dashboard.
 
 The dashboard analyses ONE camera at a time (picked in the notebook or the
-dashboard UI); this file is the pool of choices — Thailand, Turkey, Japan
+dashboard UI); this file is the pool of choices - Thailand, Turkey, Japan
 and USA public webcams.
 
 Geo-restriction note: Turkey IBB streams (livestream.ibb.gov.tr, cam ids
 starting with taksim/beyazit/eyup/etc.) return HTTP 404 for requests from
-non-Turkey IPs — they are geo-restricted at the origin. Run those from a
+non-Turkey IPs - they are geo-restricted at the origin. Run those from a
 Turkey-routed IP for live data; otherwise the collector logs MISS and the
 dashboard shows "stream unavailable". The Thailand/Japan/USA cameras have
 no such restriction.
