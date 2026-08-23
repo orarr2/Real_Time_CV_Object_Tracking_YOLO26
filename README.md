@@ -249,11 +249,14 @@ real-time-cv-yolo26/
       osnet_x0_25_msmt17.onnx
       uploads/                      uploaded videos land here
     web/
-      index.html, app.js, cameras.js
+      index.html, app.js
       snapshots/                    saved detections + review crops
     tests/                          pytest suite
     tools/
       calibrate_conf.py             per-camera confidence calibration CLI
+                                    (currently non-functional after the
+                                    review-system removal; used only by
+                                    notebook Section 10c)
     docs/
       PROJECT_GUIDE.md              deep-dive (English)
       PROJECT_GUIDE_HE.md           deep-dive (Hebrew)

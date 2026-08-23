@@ -89,7 +89,13 @@ def compute(review_store) -> dict:
     for fr in frame_reviews:
         meta_boxes_by_id = {}
         try:
-            from app.review_frames import load_metadata
+            try:
+                from app.review_frames import load_metadata
+            except ImportError:
+                raise ModuleNotFoundError(
+                    "app.review_frames was removed in the 2026-08-16 cleanup; "
+                    "this feature is no longer available."
+                )
             meta = load_metadata(fr.frame_path)
             for b in (meta or {}).get("boxes", []):
                 meta_boxes_by_id[str(b["id"])] = b.get("cls", "?")

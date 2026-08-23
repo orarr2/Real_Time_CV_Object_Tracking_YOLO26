@@ -159,7 +159,13 @@ class _VisualSearchState:
     def get(self):
         with self._lock:
             if not self._ready:
-                from app.visual_search import DEFAULT_DB, SnapshotIndex
+                try:
+                    from app.visual_search import DEFAULT_DB, SnapshotIndex
+                except ImportError:
+                    raise ModuleNotFoundError(
+                        "app.visual_search was removed in the 2026-08-16 cleanup; "
+                        "this endpoint / feature is no longer available."
+                    )
                 from app.reid_embed import make_embedder
                 self.embedder = make_embedder(os.environ.get("REID_MODEL") or None)
                 self.db_path = os.environ.get("REID_DB") or DEFAULT_DB
@@ -198,7 +204,13 @@ class _VisualSearchState:
                     # one, so the Review-detections panel opened on "no frames
                     # in the pool yet" and could not teach the user anything.
                     try:
-                        from app.review_frames import bootstrap_from_fixtures as _rf_bootstrap
+                        try:
+                            from app.review_frames import bootstrap_from_fixtures as _rf_bootstrap
+                        except ImportError:
+                            raise ModuleNotFoundError(
+                                "app.review_frames was removed in the 2026-08-16 cleanup; "
+                                "this endpoint / feature is no longer available."
+                            )
                         n = _rf_bootstrap(self.model, DOCS_IMAGES_DIR, SNAPSHOTS_DIR)
                         if n:
                             print(f"visual-search: bootstrapped {n} demo "
@@ -259,7 +271,13 @@ def _review_store():
     with _REVIEW_STORE_LOCK:
         if _REVIEW_STORE is None:
             try:
-                from app.labels import ReviewStore
+                try:
+                    from app.labels import ReviewStore
+                except ImportError:
+                    raise ModuleNotFoundError(
+                        "app.labels was removed in the 2026-08-16 cleanup; "
+                        "this endpoint / feature is no longer available."
+                    )
                 _REVIEW_STORE = ReviewStore()
             except ImportError:
                 # app.labels was deleted with the Category B cleanup - the
@@ -1288,7 +1306,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             # review_crops/ so they are searchable RIGHT NOW. No-op when the
             # frames pool hasn't changed - one directory listing.
             try:
-                from app.frame_crops import refresh as _fc_refresh
+                try:
+                    from app.frame_crops import refresh as _fc_refresh
+                except ImportError:
+                    raise ModuleNotFoundError(
+                        "app.frame_crops was removed in the 2026-08-16 cleanup; "
+                        "this endpoint / feature is no longer available."
+                    )
                 fc = _fc_refresh(st.embedder, SNAPSHOTS_DIR)
                 if fc.get("crops_added"):
                     print(f"  * review-crops: +{fc['crops_added']} "
@@ -1296,7 +1320,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             except Exception as ex:
                 print(f"  ! review-crops refresh skipped: {type(ex).__name__}: {ex}")
             if data:
-                from app.visual_search import search_image_bytes
+                try:
+                    from app.visual_search import search_image_bytes
+                except ImportError:
+                    raise ModuleNotFoundError(
+                        "app.visual_search was removed in the 2026-08-16 cleanup; "
+                        "this endpoint / feature is no longer available."
+                    )
                 result = search_image_bytes(
                     data, model=st.model, embedder=st.embedder,
                     snapshot_index=st.index, db_path=st.db_path,
@@ -1328,7 +1358,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 # Browse mode: no reference photo. The user asked for
                 # "N cars between X and Y" - list crops in time order.
-                from app.visual_search import browse_snapshots
+                try:
+                    from app.visual_search import browse_snapshots
+                except ImportError:
+                    raise ModuleNotFoundError(
+                        "app.visual_search was removed in the 2026-08-16 cleanup; "
+                        "this endpoint / feature is no longer available."
+                    )
                 result = browse_snapshots(
                     embedder=st.embedder, snapshot_index=st.index,
                     classes=classes, time_from=time_from, time_to=time_to,
@@ -1365,7 +1401,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             s = None
             if strategy == "badge":
                 try:
-                    from app.badge import sample_crop_badge
+                    try:
+                        from app.badge import sample_crop_badge
+                    except ImportError:
+                        raise ModuleNotFoundError(
+                            "app.badge was removed in the 2026-08-16 cleanup; "
+                            "this endpoint / feature is no longer available."
+                        )
                     ranked = sample_crop_badge(_review_store(), SNAPSHOTS_DIR)
                     if ranked and ranked.get("batch"):
                         s = {**ranked["batch"][0], "sampler": "badge"}
@@ -1373,7 +1415,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     print(f"  ! badge sampler failed, falling back to naive: "
                           f"{type(ex).__name__}: {ex}")
             if s is None:
-                from app.labels import sample_crop
+                try:
+                    from app.labels import sample_crop
+                except ImportError:
+                    raise ModuleNotFoundError(
+                        "app.labels was removed in the 2026-08-16 cleanup; "
+                        "this endpoint / feature is no longer available."
+                    )
                 s = sample_crop(_review_store(), SNAPSHOTS_DIR)
                 if s is not None:
                     s["sampler"] = "naive"
@@ -1438,7 +1486,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             # a polygon. Silent failure - we never want a blacklist step to
             # break a save.
             try:
-                from app.auto_blacklist import consider_review
+                try:
+                    from app.auto_blacklist import consider_review
+                except ImportError:
+                    raise ModuleNotFoundError(
+                        "app.auto_blacklist was removed in the 2026-08-16 cleanup; "
+                        "this endpoint / feature is no longer available."
+                    )
                 consider_review(_review_store(), r)
             except Exception as ex:
                 print(f"  ! auto_blacklist skipped: {type(ex).__name__}: {ex}")
@@ -1448,8 +1502,20 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             # picks it up on its next hot-reload without a restart.
             try:
                 if not was_reviewed:
-                    from app.confidence_boost import apply_review
-                    from app.auto_blacklist import _cam_id_from_crop
+                    try:
+                        from app.confidence_boost import apply_review
+                    except ImportError:
+                        raise ModuleNotFoundError(
+                            "app.confidence_boost was removed in the 2026-08-16 cleanup; "
+                            "this endpoint / feature is no longer available."
+                        )
+                    try:
+                        from app.auto_blacklist import _cam_id_from_crop
+                    except ImportError:
+                        raise ModuleNotFoundError(
+                            "app.auto_blacklist was removed in the 2026-08-16 cleanup; "
+                            "this endpoint / feature is no longer available."
+                        )
                     cam_id_from_crop = _cam_id_from_crop(crop_path)
                     if cam_id_from_crop:
                         apply_review(cam_id_from_crop,
@@ -1460,7 +1526,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             # Ship the fresh verdicts to cloud Storage so the nightly
             # trainer sees them with the operator's PC off. Fire-and-forget.
             try:
-                from app.training_sync import push_async
+                try:
+                    from app.training_sync import push_async
+                except ImportError:
+                    raise ModuleNotFoundError(
+                        "app.training_sync was removed in the 2026-08-16 cleanup; "
+                        "this endpoint / feature is no longer available."
+                    )
                 push_async()
             except Exception as ex:
                 print(f"  ! training_sync skipped: {type(ex).__name__}: {ex}")
@@ -1476,7 +1548,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         try:
             summary = _review_store().summary()
             try:
-                from app.confidence_boost import summary as _cb_summary
+                try:
+                    from app.confidence_boost import summary as _cb_summary
+                except ImportError:
+                    raise ModuleNotFoundError(
+                        "app.confidence_boost was removed in the 2026-08-16 cleanup; "
+                        "this endpoint / feature is no longer available."
+                    )
                 summary["boost"] = _cb_summary()
             except Exception as ex:
                 summary["boost"] = {"error": f"{type(ex).__name__}"}
@@ -1555,14 +1633,26 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 if ".." in rel.split("/") or rel.startswith("/") or "\\" in rel:
                     self._send_json(400, {"error": "invalid path"})
                     return
-                from app.labels import load_frame
+                try:
+                    from app.labels import load_frame
+                except ImportError:
+                    raise ModuleNotFoundError(
+                        "app.labels was removed in the 2026-08-16 cleanup; "
+                        "this endpoint / feature is no longer available."
+                    )
                 s = load_frame(_review_store(), rel, SNAPSHOTS_DIR)
                 if s is None:
                     self._send_json(404, {"error": "frame not found"})
                     return
                 self._send_json(200, s)
                 return
-            from app.labels import sample_frame
+            try:
+                from app.labels import sample_frame
+            except ImportError:
+                raise ModuleNotFoundError(
+                    "app.labels was removed in the 2026-08-16 cleanup; "
+                    "this endpoint / feature is no longer available."
+                )
             scope = (q.get("scope") or [""])[0].strip()
             allowed = self._local_pick_ids() if scope == "local" else None
             s = sample_frame(_review_store(), SNAPSHOTS_DIR,
@@ -1649,9 +1739,21 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             # re-submission - the frame's learning signal was already spent.
             if not was_reviewed:
                 try:
-                    from app.confidence_boost import apply_review
+                    try:
+                        from app.confidence_boost import apply_review
+                    except ImportError:
+                        raise ModuleNotFoundError(
+                            "app.confidence_boost was removed in the 2026-08-16 cleanup; "
+                            "this endpoint / feature is no longer available."
+                        )
                     # Metadata (class per box_id) sits next to the frame - reload it.
-                    from app.review_frames import load_metadata
+                    try:
+                        from app.review_frames import load_metadata
+                    except ImportError:
+                        raise ModuleNotFoundError(
+                            "app.review_frames was removed in the 2026-08-16 cleanup; "
+                            "this endpoint / feature is no longer available."
+                        )
                     meta = load_metadata(frame_path, SNAPSHOTS_DIR) or {}
                     cls_by_id = {str(b["id"]): b.get("cls", "?")
                                  for b in (meta.get("boxes") or [])}
@@ -1681,7 +1783,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             # Verdicts + this frame's jpg/json go to Storage training/ in a
             # background thread - the nightly cloud trainer's input.
             try:
-                from app.training_sync import push_async
+                try:
+                    from app.training_sync import push_async
+                except ImportError:
+                    raise ModuleNotFoundError(
+                        "app.training_sync was removed in the 2026-08-16 cleanup; "
+                        "this endpoint / feature is no longer available."
+                    )
                 push_async()
             except Exception as ex:
                 print(f"  ! training_sync skipped: {type(ex).__name__}: {ex}")
@@ -1706,7 +1814,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json(400, {"error": "cam_id and numeric entity_id required"})
                 return
             try:
-                from app.entity_gallery import list_sightings
+                try:
+                    from app.entity_gallery import list_sightings
+                except ImportError:
+                    raise ModuleNotFoundError(
+                        "app.entity_gallery was removed in the 2026-08-16 cleanup; "
+                        "this endpoint / feature is no longer available."
+                    )
                 items = list_sightings(cam_id, int(eid_raw), SNAPSHOTS_DIR)
             except ImportError:
                 # entity_gallery was deleted with the Category B cleanup;
@@ -1729,8 +1843,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         # the review_frames tree, drop back a small set of fixture frames so
         # the Review UI opens on real content on the next request.
         try:
-            from app.review_frames import (clear_all,
-                                            bootstrap_from_fixtures as rf_boot)
+            try:
+                from app.review_frames import clear_all, bootstrap_from_fixtures as rf_boot
+            except ImportError:
+                raise ModuleNotFoundError(
+                    "app.review_frames was removed in the 2026-08-16 cleanup; "
+                    "this endpoint / feature is no longer available."
+                )
             result = clear_all(SNAPSHOTS_DIR)
             if _VISUAL_SEARCH._ready and _VISUAL_SEARCH.model is not None:
                 try:
@@ -1763,7 +1882,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(400, {"error": "body must be JSON"})
             return
         try:
-            from app.auto_blacklist import add_polygon
+            try:
+                from app.auto_blacklist import add_polygon
+            except ImportError:
+                raise ModuleNotFoundError(
+                    "app.auto_blacklist was removed in the 2026-08-16 cleanup; "
+                    "this endpoint / feature is no longer available."
+                )
             result = add_polygon(
                 cam_id=str(body.get("cam_id") or "").strip(),
                 cls=str(body.get("cls") or "").strip(),
@@ -1792,7 +1917,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         watch each verdict move the effective confidence for that camera.
         """
         try:
-            from app.confidence_boost import details
+            try:
+                from app.confidence_boost import details
+            except ImportError:
+                raise ModuleNotFoundError(
+                    "app.confidence_boost was removed in the 2026-08-16 cleanup; "
+                    "this endpoint / feature is no longer available."
+                )
             self._send_json(200, details())
         except Exception as e:
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
@@ -2084,7 +2215,13 @@ def _warm_visual_search_async() -> None:
                 # Extraction first (was the boot-time blocker, now idle-
                 # only), then embedding of whatever is new.
                 try:
-                    from app.frame_crops import refresh as _fc_refresh
+                    try:
+                        from app.frame_crops import refresh as _fc_refresh
+                    except ImportError:
+                        raise ModuleNotFoundError(
+                            "app.frame_crops was removed in the 2026-08-16 cleanup; "
+                            "this endpoint / feature is no longer available."
+                        )
                     fc = _fc_refresh(st.embedder, SNAPSHOTS_DIR)
                     if fc.get("frames_touched"):
                         print(f"  * review-crops refresh {fc} (background)")

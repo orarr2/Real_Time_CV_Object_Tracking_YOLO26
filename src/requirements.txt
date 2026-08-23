@@ -24,5 +24,14 @@ psutil>=5.9
 # --- Non-Latin plate OCR (2026-08-17: on by default) --------------------
 easyocr>=1.7          # Thai/Arabic/Japanese/Chinese plate OCR (~150 MB per lang)
 
+# --- Plate OCR runtime (2026-08-23: HARD dep, was silently required) ----
+# fast-plate-ocr's Latin head is wrapped by app.plates._OvOcr, which
+# `import openvino` unconditionally. Without it, load_ocr() raises
+# ModuleNotFoundError on the first plates tick and the layer's error
+# guard latches _plates_err_once=True for the rest of the session -
+# LPR silently reads zero plates even though YOLO keeps drawing
+# vehicle boxes.
+openvino>=2024.0
+
 # --- Optional at runtime (uncomment if used) ---
 # onnxruntime>=1.17   # required for OSNet re-id and plate OCR ONNX

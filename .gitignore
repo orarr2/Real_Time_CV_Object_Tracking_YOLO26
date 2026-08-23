@@ -29,6 +29,20 @@ src/data/*.json
 __pycache__/
 *.pyc
 
+# Session-scoped snapshots that were missing from the list
+src/web/snapshots/detections/
+src/web/snapshots/crossings/
+
+# Notebook checkpoint dirs
+.ipynb_checkpoints/
+
+# Local Claude Code state (never source)
+.claude/
+
+# Ad-hoc screenshots at repo root
+/Screenshot *.png
+/Screenshot*.png
+
 # OS / editor
 .DS_Store
 Thumbs.db

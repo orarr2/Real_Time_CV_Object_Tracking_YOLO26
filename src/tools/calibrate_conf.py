@@ -46,7 +46,13 @@ _CROP_NAME = re.compile(r"^\d+_([a-z]+)_(\d{2,3})(?:_u\d{2,3})?\.jpg$")
 
 def collect_verdicts(store, snapshots_root) -> dict[tuple[str, str], list]:
     """(cam_id, cls) -> [(conf, is_tp), ...] from both review surfaces."""
-    from app.review_frames import load_metadata
+    try:
+        from app.review_frames import load_metadata
+    except ImportError:
+        raise ModuleNotFoundError(
+            "app.review_frames was removed in the 2026-08-16 cleanup; "
+            "this feature is no longer available."
+        )
 
     out: dict[tuple[str, str], list] = {}
 
@@ -121,8 +127,20 @@ def calibrate(store, snapshots_root,
 
 
 def main() -> None:
-    from app.labels import ReviewStore
-    from app.visual_search import SNAPSHOTS_ROOT
+    try:
+        from app.labels import ReviewStore
+    except ImportError:
+        raise ModuleNotFoundError(
+            "app.labels was removed in the 2026-08-16 cleanup; "
+            "this feature is no longer available."
+        )
+    try:
+        from app.visual_search import SNAPSHOTS_ROOT
+    except ImportError:
+        raise ModuleNotFoundError(
+            "app.visual_search was removed in the 2026-08-16 cleanup; "
+            "this feature is no longer available."
+        )
 
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--target-precision", type=float, default=TARGET_PRECISION)
