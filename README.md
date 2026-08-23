@@ -1,8 +1,21 @@
 # Real-Time CV Object Tracking - YOLO26
 
+> **Changes in the 2026-08-23 session** (full decision log in
+> `AUDIT_2026-08-23.md`): ~1,900 lines of dead code removed (dead server
+> endpoints, burst-analytics chain, blur path, live_samples /
+> anomaly_crops / calibrate_conf); plate detector upgraded to
+> yolov11-L + OCR to fast-plate-ocr `cct_s_v2` + pose to `yolov8s-pose`;
+> body-anomaly gates hardened (ratio 8, 10-sample/10-s bbox window,
+> 2-tick debounce, 60-px both-fast fighting rule); NEW Fall-detection
+> layer (11 layers now); per-country plate grammar; hot-trail decay +
+> 15-s replay ring; PDT clock-sync probe implemented; per-layer drawers
+> split into `app/layers/draw.py`. Thresholds reference:
+> `src/docs/DECISION_THRESHOLDS_HE.md`.
+
+
 Single-camera live analysis dashboard for public street webcams. Pick one
 camera (Thailand catalog or an uploaded MP4/MKV), run YOLO26 detection plus
-one of 10 analysis layers on top of the live video.
+one of 11 analysis layers on top of the live video.
 
 - **Frontend:** static HTML/JS + Chart.js. HLS via `hls.js`, YouTube via
   iframe embed. Canvas overlay draws boxes on top of the live video with
@@ -72,7 +85,7 @@ Model weights are not shipped with the repo (see
 [Model files](#model-files)). The notebook's setup cell (section 0,
 `## 0. Setup`) verifies Python dependencies AND downloads every optional
 weight directly onto the machine running the notebook - `yolo26m.pt`
-and `yolov8n-pose.pt` come via `ultralytics` on first model load; the
+and `yolov8s-pose.pt` come via `ultralytics` on first model load; the
 LPR + face weights are fetched by the same setup cell before that. No
 manual downloads, no separate script.
 
@@ -146,8 +159,9 @@ stream (accumulators are preserved).
 | 6 | `line`     | Counting line drawn by the operator; increments in / out counters.               |
 | 7 | `loiter`   | Dwell alerts on operator-drawn polygons.                                         |
 | 8 | `parking`  | Occupancy flips (empty <-> filled) on operator-drawn polygons.                   |
-| 9 | `plates`   | Two-stage LPR (yolov8n-plate + fast-plate-ocr) with per-track cache.             |
+| 9 | `plates`   | Two-stage LPR (yolov11-L plate detector + fast-plate-ocr) with per-track cache.  |
 | 10 | `heat`    | 48x27 grid activity heatmap with 180 s half-life decay.                          |
+| 11 | `fall`    | Posture-based fall suspect: torso lean / lying aspect after an upright history.  |
 
 ## Model files
 
@@ -155,9 +169,9 @@ stream (accumulators are preserved).
 | -------------------------------------------- | ------------------------------------------------------------------------ | --------------- |
 | `yolo26m.pt`                                 | Primary detector (person + vehicles + train).                            | Auto-downloaded on first `YOLO("yolo26m.pt")` call by `ultralytics`. |
 | `src/yolo26m_openvino_model/`                | OpenVINO IR cache for `yolo26m.pt` (2-3x faster on CPU).                 | Built locally with `YOLO("yolo26m.pt").export(format="openvino")`. |
-| `yolov8n-plate.pt` + `_openvino_model/`      | LPR stage 1: locate plate boxes inside a vehicle crop.                   | [Koushim/yolov8-license-plate-detection](https://huggingface.co/Koushim/yolov8-license-plate-detection) (MIT). Convert with the same `export(format="openvino")` call. |
-| `plate_ocr_global.onnx`                      | LPR stage 2: Latin OCR (digits + A-Z, 9 slots).                          | [fast-plate-ocr `cct_xs_relu_v1_global`](https://github.com/ankandrew/fast-plate-ocr) (MIT). |
-| `yolov8n-pose.pt` + `_openvino_model/`       | Top-down COCO-17 keypoints on person crops.                              | Auto-downloaded on first `YOLO("yolov8n-pose.pt")` call by `ultralytics`. |
+| `yolov11l-plate.pt`                          | LPR stage 1: locate plate boxes inside a vehicle crop (Large finetune).  | [morsetechlab/yolov11-license-plate-detection](https://huggingface.co/morsetechlab/yolov11-license-plate-detection) (`license-plate-finetune-v1l.pt`). |
+| `plate_ocr_global.onnx`                      | LPR stage 2: Latin OCR (digits + A-Z, 10 slots + region head).           | [fast-plate-ocr `cct_s_v2_global`](https://github.com/ankandrew/fast-plate-ocr) (MIT). |
+| `yolov8s-pose.pt`                            | Top-down COCO-17 keypoints on person crops (Small).                      | Auto-downloaded on first `YOLO("yolov8s-pose.pt")` call by `ultralytics`. |
 | `models/FSRCNN_x4.pb`                        | 4x super-resolution applied to small plate / vehicle crops before OCR.   | [Saafke/FSRCNN Tensorflow](https://github.com/Saafke/FSRCNN_Tensorflow) - grab `FSRCNN_x4.pb` (Apache-2.0). |
 | `src/data/face_detection_yunet_2023mar.onnx` | YuNet face detector (bounding boxes only).                               | [opencv/opencv_zoo `face_detection_yunet_2023mar.onnx`](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet). |
 | `src/data/osnet_x0_25_msmt17.onnx`           | OSNet re-identification embedding (falls back to HSV histogram if absent). | [KaiyangZhou/deep-person-reid](https://github.com/KaiyangZhou/deep-person-reid) - export `osnet_x0_25` to ONNX. |
@@ -224,8 +238,8 @@ client-side interpolation and velocity extrapolation.
 real-time-cv-yolo26/
   README.md                         (this file)
   yolo26m.pt                        primary detector
-  yolov8n-plate.pt + _openvino_model/
-  yolov8n-pose.pt  + _openvino_model/
+  yolov11l-plate.pt
+  yolov8s-pose.pt
   plate_ocr_global.onnx             Latin plate OCR
   models/
     FSRCNN_x4.pb                    optional 4x super-resolution
@@ -240,9 +254,9 @@ real-time-cv-yolo26/
       cameras.py                    camera catalog
       tracker.py                    BurstTracker
       plates.py, pose.py, faces.py, gestures.py, heatmap.py,
-      behavior.py, presence.py, reid.py, reid_embed.py,
-      local_producers.py, live_samples.py, model_metrics.py,
-      anomaly_crops.py, __init__.py
+      behavior.py, reid.py, reid_embed.py,
+      local_producers.py, model_metrics.py, __init__.py
+      layers/                       per-layer frame drawers (D1 split)
       yolo26m_openvino_model/       OpenVINO IR for the primary detector
     data/
       face_detection_yunet_2023mar.onnx
@@ -252,11 +266,7 @@ real-time-cv-yolo26/
       index.html, app.js
       snapshots/                    saved detections + review crops
     tests/                          pytest suite
-    tools/
-      calibrate_conf.py             per-camera confidence calibration CLI
-                                    (currently non-functional after the
-                                    review-system removal; used only by
-                                    notebook Section 10c)
+    tools/                          (empty - calibration CLI retired)
     docs/
       PROJECT_GUIDE.md              deep-dive (English)
       PROJECT_GUIDE_HE.md           deep-dive (Hebrew)
@@ -291,10 +301,6 @@ variable in that cell if you already have something on 8000.
 file is missing or unreadable. The Review UI was removed with the code
 cleanup so this endpoint returns an empty state; the header falls back
 to "Model: no feedback yet".
-
-**`ModuleNotFoundError: No module named 'app.visual_search'`:** left
-over from a partial upgrade. The visual-search feature was removed;
-`src/app/anomaly_crops.py` is now a stub that returns an empty summary.
 
 **`ImportError` in a test file:** the tests for the removed subsystems
 (`test_visual_search.py`, `test_review_queue.py`,

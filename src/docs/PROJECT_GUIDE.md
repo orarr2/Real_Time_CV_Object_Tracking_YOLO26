@@ -1,5 +1,18 @@
 # Project guide - Real-Time CV Object Tracking (YOLO26)
 
+> **Changes in the 2026-08-23 session** (full decision log in
+> `AUDIT_2026-08-23.md`): ~1,900 lines of dead code removed (dead server
+> endpoints, burst-analytics chain, blur path, live_samples /
+> anomaly_crops / calibrate_conf); plate detector upgraded to
+> yolov11-L + OCR to fast-plate-ocr `cct_s_v2` + pose to `yolov8s-pose`;
+> body-anomaly gates hardened (ratio 8, 10-sample/10-s bbox window,
+> 2-tick debounce, 60-px both-fast fighting rule); NEW Fall-detection
+> layer (11 layers now); per-country plate grammar; hot-trail decay +
+> 15-s replay ring; PDT clock-sync probe implemented; per-layer drawers
+> split into `app/layers/draw.py`. Thresholds reference:
+> `src/docs/DECISION_THRESHOLDS_HE.md`.
+
+
 Deep-dive companion to `README.md` at the repo root. This file covers
 the actual runtime pipeline, every tunable configuration knob, the
 mechanics of each of the ten analysis layers, and the extension points
@@ -149,9 +162,9 @@ reads) is what the dashboard tab sees over its polling loop.
 | `body`     | `live_analysis.py` (inline) | Kinematic flags + gesture flags per person track.                                             |
 | `faces`    | `faces.py`                  | YuNet CV DNN. `FACE_SCORE = 0.60`, box side >= 24 px. Empty result on far-field cameras is by design. |
 | `line`     | `cameras.py`, live_analysis | Counting line drawn by the operator. In / out determined by sign flip across A -> B.          |
-| `loiter`   | `presence.py`               | Polygon dwell detection with per-track cooldown.                                              |
+| `loiter`   | `live_analysis.py` (zones)  | Polygon dwell detection with per-track cooldown (folds into the parking layer's zone engine). |
 | `parking`  | `live_analysis.py` (inline) | Occupancy flip on operator-drawn spots plus a 12 s per-spot re-probe.                         |
-| `plates`   | `plates.py`                 | Two-stage LPR (yolov8n-plate + fast-plate-ocr) with per-track cache and multi-frame integration. |
+| `plates`   | `plates.py`                 | Two-stage LPR (yolov11-L + fast-plate-ocr cct_s_v2) with per-track cache, multi-frame integration and a per-country grammar gate. |
 | `heat`     | `heatmap.py`                | 48x27 grid, foot-point accumulation, 180 s half-life decay.                                   |
 
 ## 3. Confidence thresholds and display gates

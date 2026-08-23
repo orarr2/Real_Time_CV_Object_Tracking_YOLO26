@@ -1,5 +1,26 @@
 # Real-Time CV YOLO26 - Technical Roadmap
 
+> **Changes in the 2026-08-23 session** (full decision log in
+> `AUDIT_2026-08-23.md`): ~1,900 lines of dead code removed (dead server
+> endpoints, burst-analytics chain, blur path, live_samples /
+> anomaly_crops / calibrate_conf); plate detector upgraded to
+> yolov11-L + OCR to fast-plate-ocr `cct_s_v2` + pose to `yolov8s-pose`;
+> body-anomaly gates hardened (ratio 8, 10-sample/10-s bbox window,
+> 2-tick debounce, 60-px both-fast fighting rule); NEW Fall-detection
+> layer (11 layers now); per-country plate grammar; hot-trail decay +
+> 15-s replay ring; PDT clock-sync probe implemented; per-layer drawers
+> split into `app/layers/draw.py`. Thresholds reference:
+> `src/docs/DECISION_THRESHOLDS_HE.md`.
+
+> **Roadmap status after the 2026-08-23 session:** items now DONE and
+> no longer open here: per-layer draw split (first slice of the
+> live_analysis refactor), hot-trail strip decay, replay ring
+> (15 s scoped variant), fall-detection layer, PDT clock-sync probe,
+> per-country plate grammar, model upgrades (pose-S / plate-L /
+> OCR cct_s_v2), body-anomaly hardening. Remaining items below are
+> unchanged planning text and may reference the pre-split layout.
+
+
 Source: multi-agent CV/YOLO research pass (2026-08-17). Eight parallel
 research strands scanned leading channels (OpenViewer, AI Dev Guy, Mohsin
 Ali, Roboflow, SkalskiP, Ultralytics, LearnOpenCV, JetsonHacks) and the
@@ -121,7 +142,7 @@ with_reid: false          # flip to true after Q1+M1 (SOLIDER)
 **Delta** - Homegrown position tracker → industry standard. Track ID
 stability across occlusion improves markedly on crowded street scenes.
 
-**Effort** - ~4 h (swap + regression test the 10 layers). **Deps** -
+**Effort** - ~4 h (swap + regression test the 11 layers). **Deps** -
 none new (bundled with `ultralytics>=8.4`). **Status** - ⬜
 
 ---
