@@ -192,6 +192,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/analysis/events":
             self._analysis_events()
             return
+        if path == "/api/analysis/replay":
+            self._analysis_replay()
+            return
         if path == "/api/analysis/saved":
             self._analysis_saved()
             return
@@ -779,6 +782,25 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                                            "camera"})
             return
         self._send_json(200, {"events": evs})
+
+    def _analysis_replay(self) -> None:
+        """GET /api/analysis/replay?cam=<id>[&ts=<epoch>] - the session's
+        last-15s annotated-frame ring (base64 JPEGs @2 fps, decision D3).
+        With ts, only frames near that moment."""
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        cam = (q.get("cam") or [""])[0]
+        try:
+            ts = float((q.get("ts") or ["0"])[0]) or None
+        except ValueError:
+            ts = None
+        from app.live_analysis import MANAGER
+        clip = MANAGER.replay(cam, ts) if cam else None
+        if clip is None:
+            self._send_json(404, {"error": "no live analysis for this "
+                                           "camera"})
+            return
+        self._send_json(200, {"ok": True, **clip})
 
     def _analysis_event_save(self) -> None:
         """POST /api/analysis/event/save?cam=<id>&id=<event_id> - persist

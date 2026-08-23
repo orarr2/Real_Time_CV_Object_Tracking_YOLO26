@@ -672,6 +672,7 @@ const ANALYSIS_LAYER_DEFS = [
   ["pose",     "Pose & skeleton"],
   ["gestures", "Hand gestures"],
   ["body",     "Body anomalies"],
+  ["fall",     "Fall detection"],
   ["faces",    "Face detection"],
   ["line",     "Line crossing"],
   ["fire",     "Fire detection"],
@@ -1018,6 +1019,17 @@ async function pollAnalysisEvents(st) {
   }
   const chips = a.evStrip.querySelectorAll(".event-chip");
   for (let i = 30; i < chips.length; i++) chips[i].remove();
+  // Hot-trail decay (decision D2, 2026-08-23): a chip is a ROLLING
+  // recent-events trail, not an archive - the gallery keeps saved ones.
+  // Fade after EV_CHIP_FADE_S, drop entirely after EV_CHIP_TTL_S.
+  const nowS = Date.now() / 1000;
+  for (const c of a.evStrip.querySelectorAll(".event-chip")) {
+    const ts = Number(c.dataset.ts || 0);
+    if (!ts) continue;
+    const age = nowS - ts;
+    if (age > EV_CHIP_TTL_S) c.remove();
+    else c.style.opacity = age > EV_CHIP_FADE_S ? "0.35" : "";
+  }
   const cur = a.actualLayer || a.layer;
   let visible = 0;
   // 2026-08-23 (B6): obstruction events fire in live_analysis regardless
@@ -1035,10 +1047,26 @@ async function pollAnalysisEvents(st) {
   catch (_) { /* HUD is decorative */ }
 }
 
+// Hot-trail tuning (decision D2): chips fade at 60s and vanish at 90s;
+// a fresh arrival pulses once so the operator's eye is drawn to it.
+const EV_CHIP_FADE_S = 60;
+const EV_CHIP_TTL_S = 90;
+(() => {
+  const st = document.createElement("style");
+  st.textContent = `@keyframes evPulse {
+      0% { box-shadow: 0 0 0 0 rgba(37,99,235,.75); }
+    100% { box-shadow: 0 0 0 12px rgba(37,99,235,0); } }
+  .event-chip.ev-new { animation: evPulse 1.2s ease-out 2; }`;
+  document.head.appendChild(st);
+})();
+
 function _eventChip(a, ev) {
   const chip = document.createElement("div");
-  chip.className = "event-chip";
+  chip.className = "event-chip ev-new";
   chip.dataset.layer = ev.layer || "";
+  chip.dataset.ts = String(ev.ts || "");
+  chip.addEventListener("animationend", () => chip.classList.remove("ev-new"),
+                        { once: true });
   chip.style.cssText =
     "flex:0 0 auto;display:flex;gap:6px;align-items:center;" +
     "background:#111a2e;border:1px solid #1e293b;border-radius:6px;" +
@@ -1056,7 +1084,13 @@ function _eventChip(a, ev) {
     <button class="event-save" title="save this detection for later study"
             style="background:#1d4ed8;color:#fff;border:0;border-radius:5px;
                    padding:4px 7px;cursor:pointer;font-size:11px;flex:0 0 auto">
-      ${ev.saved ? "saved" : "save"}</button>`;
+      ${ev.saved ? "saved" : "save"}</button>
+    <button class="event-replay" title="replay the seconds around this event"
+            style="background:#334155;color:#e2e8f0;border:0;border-radius:5px;
+                   padding:4px 7px;cursor:pointer;font-size:11px;flex:0 0 auto">
+      replay</button>`;
+  chip.querySelector(".event-replay").addEventListener("click",
+      () => openReplayModal(a.cam, ev.ts));
   const btn = chip.querySelector(".event-save");
   if (ev.saved) btn.disabled = true;
   btn.addEventListener("click", async () => {
@@ -1070,6 +1104,51 @@ function _eventChip(a, ev) {
     } catch (_) { btn.textContent = "err"; btn.disabled = false; }
   });
   return chip;
+}
+
+async function openReplayModal(cam, ts) {
+  // D3 (2026-08-23): minimal in-page player over the last-15s annotated
+  // ring - frames come as base64 JPEGs at the server's replay fps.
+  let d;
+  try {
+    const r = await fetch(`/api/analysis/replay?cam=${encodeURIComponent(cam)}`
+                          + (ts ? `&ts=${ts}` : ""));
+    d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || r.status);
+  } catch (e) {
+    alert("replay unavailable: " + e.message);
+    return;
+  }
+  const frames = d.frames || [];
+  if (!frames.length) {
+    alert("replay ring is empty for this moment (it holds ~15s)");
+    return;
+  }
+  const ov = document.createElement("div");
+  ov.style.cssText = "position:fixed;inset:0;background:rgba(2,6,17,.88);" +
+    "z-index:9999;display:flex;flex-direction:column;align-items:center;" +
+    "justify-content:center;gap:10px";
+  ov.innerHTML = `
+    <img style="max-width:92vw;max-height:82vh;border-radius:8px;
+                border:1px solid #1e293b">
+    <div style="color:#94a3b8;font-size:13px">
+      <span class="rp-pos"></span> - click anywhere to close</div>`;
+  const img = ov.querySelector("img");
+  const pos = ov.querySelector(".rp-pos");
+  let i = 0, timer = null;
+  const step = () => {
+    const f = frames[i % frames.length];
+    img.src = "data:image/jpeg;base64," + f.jpeg;
+    const t = new Date(f.ts * 1000);
+    const p = (n) => String(n).padStart(2, "0");
+    pos.textContent = `frame ${(i % frames.length) + 1}/${frames.length}` +
+      ` @ ${p(t.getHours())}:${p(t.getMinutes())}:${p(t.getSeconds())}`;
+    i += 1;
+  };
+  step();
+  timer = setInterval(step, 1000 / (d.fps || 2));
+  ov.addEventListener("click", () => { clearInterval(timer); ov.remove(); });
+  document.body.appendChild(ov);
 }
 
 async function openSavedDetections() {

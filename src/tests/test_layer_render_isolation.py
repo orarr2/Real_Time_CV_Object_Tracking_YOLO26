@@ -23,14 +23,15 @@ import pytest
 
 
 def test_layers_tuple_matches_expected_set():
-    """The dashboard's Analyze modal names 10 layers; the backend LAYERS
+    """The dashboard's Analyze modal names 11 layers; the backend LAYERS
     tuple in live_analysis is the source of truth. If someone adds a
     new layer without updating BOTH the frontend LAYER_DEFS and the
     backend LAYERS tuple, that mismatch shows up as invisible chips
-    (see obstruction bug fixed in Batch B item B6)."""
+    (see obstruction bug fixed in Batch B item B6). "fall" joined in
+    the 2026-08-23 D4 addition."""
     from app.live_analysis import LIVE_LAYERS
     expected = {
-        "paths", "pose", "gestures", "body", "faces",
+        "paths", "pose", "gestures", "body", "fall", "faces",
         "heat", "line", "fire", "parking", "plates",
     }
     assert set(LIVE_LAYERS) == expected, (
