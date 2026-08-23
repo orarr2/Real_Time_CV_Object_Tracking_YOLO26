@@ -92,18 +92,16 @@ def available() -> bool:
     return _get_detector() is not None
 
 
-def detect_faces(frame) -> list[dict]:
-    """Face rectangles on a BGR frame:
-    [{"x1","y1","x2","y2","conf"}, ...]. Empty when unavailable."""
-    det = _get_detector()
-    if det is None:
-        return []
-    try:
-        h, w = frame.shape[:2]
-        det.setInputSize((w, h))
-        _rc, faces = det.detect(frame)
-    except Exception:
-        return []
+# Second-pass upscale factor for the far-field rescue (see detect_faces).
+# 1.5x turns a 12 px street-distance face into ~18 px - back inside
+# YuNet's practical floor - while keeping the extra pass cheap.
+FACE_RESCUE_SCALE = 1.5
+FACE_RESCUE_MAX_W = 1920   # never upscale beyond this width (CPU guard)
+
+
+def _detect_once(det, frame, w, h) -> list[dict]:
+    det.setInputSize((w, h))
+    _rc, faces = det.detect(frame)
     out: list[dict] = []
     for f in (faces if faces is not None else []):
         x, y, fw, fh = (float(f[0]), float(f[1]),
@@ -113,6 +111,42 @@ def detect_faces(frame) -> list[dict]:
             "x2": min(float(w), x + fw), "y2": min(float(h), y + fh),
             "conf": round(float(f[-1]), 3),
         })
+    return out
+
+
+def detect_faces(frame) -> list[dict]:
+    """Face rectangles on a BGR frame:
+    [{"x1","y1","x2","y2","conf"}, ...]. Empty when unavailable.
+
+    Two-scale pass (operator upgrade decision 2026-08-23): YuNet runs on
+    the native frame first; when that returns nothing - the common case
+    on far-field street cams where every face is under ~15 px - a second
+    pass runs on a FACE_RESCUE_SCALE upscale and the hits are mapped
+    back to native coordinates. Costs nothing when the first pass
+    already found faces.
+    """
+    det = _get_detector()
+    if det is None:
+        return []
+    try:
+        h, w = frame.shape[:2]
+        out = _detect_once(det, frame, w, h)
+        if not out and w * FACE_RESCUE_SCALE <= FACE_RESCUE_MAX_W:
+            import cv2
+            up = cv2.resize(frame, (int(w * FACE_RESCUE_SCALE),
+                                    int(h * FACE_RESCUE_SCALE)),
+                            interpolation=cv2.INTER_CUBIC)
+            uh, uw = up.shape[:2]
+            for r in _detect_once(det, up, uw, uh):
+                out.append({
+                    "x1": r["x1"] / FACE_RESCUE_SCALE,
+                    "y1": r["y1"] / FACE_RESCUE_SCALE,
+                    "x2": r["x2"] / FACE_RESCUE_SCALE,
+                    "y2": r["y2"] / FACE_RESCUE_SCALE,
+                    "conf": r["conf"],
+                })
+    except Exception:
+        return []
     return out
 
 

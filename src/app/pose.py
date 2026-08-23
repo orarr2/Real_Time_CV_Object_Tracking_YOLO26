@@ -8,7 +8,7 @@ alone cannot answer.
 Design constraints, in order:
 
   * the detection model stays the single source of truth for WHO exists.
-    The pose model (yolov8n-pose by default) runs as a SECOND pass and its
+    The pose model (yolov8s-pose by default) runs as a SECOND pass and its
     skeletons are matched onto the detector's `person` boxes by IoU - a
     pose-person with no matching detection is discarded, never counted.
     Counts can therefore never change because pose ran;
@@ -34,7 +34,10 @@ import threading
 
 # Weights for the pose pass. Any ultralytics *-pose checkpoint works; nano
 # matches the collector's detection tier and auto-downloads on first use.
-POSE_WEIGHTS_DEFAULT = "yolov8n-pose.pt"
+# 2026-08-23 operator decision: nano -> small. Small halves the
+# keypoint miss rate on mid-distance street figures for ~3x nano
+# cost, still a fraction of the tick budget on the crops path.
+POSE_WEIGHTS_DEFAULT = "yolov8s-pose.pt"
 # Pose-pass confidence floor. Deliberately permissive: a pose-person that
 # fails to match any detection is dropped anyway, so a loose gate here
 # only costs a few wasted matches, while a tight one loses skeletons for
@@ -123,7 +126,7 @@ def load_pose_model(weights: str | None = None):
 
     A sibling `<stem>_openvino_model` export is preferred when present -
     same ~2-3x CPU gain as the detection engine. Export once with:
-        YOLO("yolov8n-pose.pt").export(format="openvino", imgsz=256)
+        YOLO("yolov8s-pose.pt").export(format="openvino", imgsz=256)
     (256 matches the per-crop inference size below; the static engine's
     input shape must equal the predict imgsz.)"""
     global _model

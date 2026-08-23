@@ -65,21 +65,21 @@ _REFERENCE_METRICS = {
         "mAP5095": 0.539,
         "params_m": 68.2,
     },
-    "yolov8n-pose.pt": {
+    "yolov8s-pose.pt": {
         "dataset": "COCO val2017 keypoints",
         "source":  "ultralytics.com/models/yolov8-pose",
-        "mAP50":   0.796,
-        "mAP5095": 0.502,
-        "params_m": 3.3,
+        "mAP50":   0.821,
+        "mAP5095": 0.599,
+        "params_m": 11.6,
     },
-    "yolov11s-plate.pt": {
+    "yolov11l-plate.pt": {
         # Specialist finetune - the HF card publishes no val-split mAP,
         # so no number is shown rather than a fabricated one.
-        "dataset": "morsetechlab/yolov11-license-plate-detection",
+        "dataset": "morsetechlab/yolov11-license-plate-detection (L)",
         "source":  "huggingface.co/morsetechlab/yolov11-license-plate-detection",
         "mAP50":   None,
         "mAP5095": None,
-        "params_m": 9.4,
+        "params_m": 25.3,
     },
     "yolo_fire.pt": {
         "dataset": "SHOU-ISD fire-and-smoke val split",
@@ -96,13 +96,13 @@ _REFERENCE_METRICS = {
         "params_m": 0.09,
     },
     "plate_ocr_global.onnx": {
-        # OCR head, not a detector - report character accuracy instead of
-        # box mAP. Rendered on a separate axis so the two number types
-        # never share a chart.
-        "dataset": "fast-plate-ocr global v2 test set",
+        # OCR head (cct_s_v2_global since 2026-08-23), not a detector -
+        # its author publishes region-F1, not char accuracy, so no
+        # number is shown rather than a fabricated one.
+        "dataset": "fast-plate-ocr global v2 (cct-s)",
         "source":  "github.com/ankandrew/fast-plate-ocr",
-        "char_acc": 0.976,
-        "params_m": 2.1,
+        "char_acc": None,
+        "params_m": 1.8,
     },
     "ESPCN_x4.pb": {
         # Super-res model - report PSNR uplift on Set14 x4.
@@ -121,8 +121,8 @@ _MODEL_ROLES = {
     "yolov8n.pt":            ("detection", "general object detection (nano)"),
     "yolov8s.pt":            ("detection", "general object detection (small)"),
     "yolo26x.pt":            ("detection", "primary detector (YOLO26 X)"),
-    "yolov8n-pose.pt":       ("pose", "keypoints for Pose / Gestures / Body layers"),
-    "yolov11s-plate.pt":     ("plates", "license-plate box detector inside a vehicle crop"),
+    "yolov8s-pose.pt":       ("pose", "keypoints for Pose / Gestures / Body layers"),
+    "yolov11l-plate.pt":     ("plates", "license-plate box detector inside a vehicle crop"),
     "plate_ocr_global.onnx": ("plates", "license-plate OCR head (Latin + digits)"),
     "ESPCN_x4.pb":           ("plates", "super-res 4x for tiny plate crops"),
     "yolo_fire.pt":          ("fire", "fire + smoke detection layer"),
