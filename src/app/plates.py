@@ -108,6 +108,37 @@ _PLATE_CLASS_NAME_NOISE = frozenset({
     "person", "people", "animal", "train", "youtube", "livestream",
     "koh", "samui", "thailand", "chaweng", "webcam", "live", "street",
 })
+# Per-country plate grammar (decision C1d, 2026-08-23). Applied AFTER
+# the OCR confidence gate: a read that fails its country's format is
+# junk even at high confidence ("2017" as a complete Turkish plate).
+# Turkey has a crisp Latin-complete grammar and gets a strict pattern;
+# Thailand / Japan plates carry native script the Latin head cannot
+# see, and US formats vary by state - those get a loose sanity pattern
+# (alnum with at least one digit) so real captures still pass while
+# pure-letter noise ("KOH", "LIVE") is rejected. Cameras outside the
+# catalog (uploads, custom URLs) skip the check entirely.
+PLATE_COUNTRY_PATTERNS = {
+    "turkey":   re.compile(r"^\d{2}[A-Z]{1,3}\d{2,4}$"),
+    "usa":      re.compile(r"^(?=.*\d)[A-Z0-9]{4,8}$"),
+    "thailand": re.compile(r"^(?=.*\d)[A-Z0-9]{4,8}$"),
+    "japan":    re.compile(r"^(?=.*\d)[A-Z0-9]{4,8}$"),
+}
+
+
+def _plate_format_ok(text: str, cam_id: str | None) -> bool:
+    """True when `text` fits the plate grammar of the camera's country
+    (permissive when the camera or its country is unknown)."""
+    if not text or not cam_id:
+        return True
+    try:
+        from app.cameras import CAMERAS
+        country = (CAMERAS.get(cam_id) or {}).get("country", "")
+    except Exception:
+        return True
+    pat = PLATE_COUNTRY_PATTERNS.get(str(country).lower())
+    return True if pat is None else bool(pat.match(text))
+
+
 # fast-plate-ocr cct_xs_relu_v1_global contract (from its shipped
 # plate_config.yaml, inlined so the .yaml need not live in the repo):
 OCR_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_"
@@ -754,8 +785,11 @@ def attach_plates(det_model, ocr: "_MultiScriptOcr", frame, tracker,
             hist = entry.setdefault("text_counts", {})
             hist[best_text] = hist.get(best_text, 0) + 1
         # Best-read-wins across the whole crop buffer AND all prior
-        # attempts on the entry.
-        if best_text and best_conf > entry.get("conf", 0):
+        # attempts on the entry. The country-grammar gate (C1d) runs
+        # here, at the single acceptance point, so both OCR variants
+        # and every buffered crop share it.
+        if (best_text and best_conf > entry.get("conf", 0)
+                and _plate_format_ok(best_text, cam_id)):
             if not entry.get("text"):
                 new_reads += 1
             entry["text"] = best_text

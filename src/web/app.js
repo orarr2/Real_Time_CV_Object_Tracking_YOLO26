@@ -1642,7 +1642,30 @@ function _updateAnalysisHud(a, d) {
   const s = root.querySelector(".hud-stages");
   const m = root.querySelector(".hud-model");
   if (p) p.textContent = String(d.person ?? "-");
-  if (v) v.textContent = String(d.vehicles ?? "-");
+  // Decision 13 (2026-08-23): the second pill follows the ACTIVE layer
+  // instead of always saying "Vehicles" - on the faces layer a vehicle
+  // count reads as noise (the audit's "vehicles on faces" confusion was
+  // exactly this text). Label element = the pill's <span> before the
+  // value <b>.
+  if (v) {
+    let lbl = "Vehicles", val = d.vehicles ?? "-";
+    if (d.layer === "faces") {
+      lbl = "Faces"; val = (d.faces || []).length;
+    } else if (d.layer === "plates") {
+      lbl = "Plates";
+      val = (d.boxes || []).filter((b) => b.plate).length;
+    } else if (d.layer === "fire") {
+      lbl = "Fire";
+      const fh = d.fire && (d.fire.hits || d.fire);
+      val = Array.isArray(fh) ? fh.length : 0;
+    } else if (d.layer === "body") {
+      lbl = "Flagged";
+      val = (d.boxes || []).filter((b) => b.alert).length;
+    }
+    v.textContent = String(val);
+    const lblEl = v.previousElementSibling;
+    if (lblEl && lblEl.textContent !== lbl) lblEl.textContent = lbl;
+  }
   if (t) {
     // Prefer the smoothed inter-tick gap the client already tracks
     // (a._gapEma); fall back to a per-tick delta when only two ticks
@@ -2483,17 +2506,19 @@ function computeActivity(rows) {
   const pIdx   = _bandIndex(people, ACTIVITY_BANDS);
   const vIdx   = _bandIndex(load, VEHICLE_BANDS);
   const idx    = Math.max(pIdx, vIdx);
-  // 2026-08-23 (B1b): the old label ("Quiet / Moderate / Busy /
-  // Crowded") used fixed bands identical for every camera, so a
-  // single-lane alley with one truck scored the same as a six-lane
-  // highway with one truck. Replace with a HONEST, camera-agnostic
-  // readout: raw median vehicle count + median people, plus the
-  // (kept-for-color) 0-10 idx so the chip still colours by band.
-  // Operators reading two cameras side-by-side can now compare.
+  // 2026-08-23 (B1b + decision 11): the old fixed "Quiet / Busy" word
+  // alone hid the actual numbers, and raw numbers alone lose the
+  // at-a-glance color. Show BOTH: the raw median counts always, and
+  // the band word only after enough history rows exist (warmup) so a
+  // cold tile never flashes a meaningless "Quiet".
   const last = rows[rows.length - 1];
   const veh = last.vehicles ?? 0;
-  const label = `${veh} veh · ${people} ppl`;
-  return { idx, label, pIdx, vIdx,
+  const band = idx <= 2 ? "quiet" : idx <= 5 ? "moderate"
+             : idx <= 8 ? "busy" : "crowded";
+  const warm = rows.length >= ACTIVITY_WARMUP_ROWS;
+  const label = `${veh} veh · ${people} ppl`
+              + (warm ? ` · ${band}` : "");
+  return { idx, label, band, warm, pIdx, vIdx,
            now: last.person ?? 0,
            veh,
            load: Math.round(load * 10) / 10 };
@@ -2508,8 +2533,9 @@ function setActivityBadge(st, act) {
     badge.title = "activity index - not enough samples yet";
     return;
   }
-  const cls = act.label.toLowerCase();
-  badge.className = `activity-badge act-${cls}`;
+  // CSS band class comes from act.band (quiet/moderate/busy/crowded) -
+  // the label itself now carries numbers and is not a valid class name.
+  badge.className = `activity-badge act-${act.band || "unknown"}`;
   text.textContent = `${act.idx}/10`;
   badge.title = `activity ${act.idx}/10 - ${act.label} - ` +
       `people ${act.now} (${act.pIdx}/10) - ` +
@@ -2536,6 +2562,9 @@ setInterval(() => {
 }, 1000);
 
 const _LOCAL_ACTIVITY_WINDOW = 6;
+// Rows of history required before the band word (quiet/busy/...) joins
+// the raw counts on the activity badge (decision 11 warmup gate).
+const ACTIVITY_WARMUP_ROWS = 5;
 const _LOCAL_HISTORY = Object.create(null);
 
 function _updateLocalTileBadges(camId, j) {
