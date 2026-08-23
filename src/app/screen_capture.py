@@ -41,6 +41,25 @@ def get_region() -> tuple[int, int, int, int] | None:
 
 _MSS_INSTANCE = None
 _LAST_GOOD_FRAME = None  # BGR ndarray; served on transient grab failures
+# 2026-08-23 (B3/C3a): the cache used to be served forever with no age
+# bound, so a hard failure (screen locked, mss dead, wrong bbox) looked
+# like a live feed. Now the cache is served only for STALE_CACHE_MAX_S
+# seconds after the last successful capture; after that, callers get
+# None and can surface a "stream stalled" state instead of looping on
+# identical pixels.
+STALE_CACHE_MAX_S = 20.0
+
+
+def _cache_or_none():
+    """Return the last good frame ONLY if it's fresh enough; otherwise
+    None. Prevents an infinite loop of identical pixels being fed into
+    the detector after mss / PIL fail permanently."""
+    if _LAST_GOOD_FRAME is None:
+        return None
+    age = time.time() - _LAST_CAPTURE_TS
+    if age > STALE_CACHE_MAX_S:
+        return None
+    return _LAST_GOOD_FRAME
 
 
 def _get_mss():
@@ -81,7 +100,7 @@ def capture(bbox: tuple[int, int, int, int] | None = None):
         import numpy as np
     except ImportError as e:
         print(f"screen_capture: {type(e).__name__}: {e}")
-        return _LAST_GOOD_FRAME
+        return _cache_or_none()
     b = bbox if bbox is not None else _LAST_BBOX
     sct = _get_mss()
     if sct is not None:
@@ -97,7 +116,7 @@ def capture(bbox: tuple[int, int, int, int] | None = None):
                 raw.height, raw.width, 3)
             _LAST_CAPTURE_TS = time.time()
             _LAST_GOOD_FRAME = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-            return _LAST_GOOD_FRAME
+            return _cache_or_none()
         except Exception as e:
             # BitBlt failures happen when the compositor is redrawing;
             # not fatal, just fall through to PIL and, ultimately, cached
@@ -109,10 +128,10 @@ def capture(bbox: tuple[int, int, int, int] | None = None):
         arr = np.array(img)
         _LAST_CAPTURE_TS = time.time()
         _LAST_GOOD_FRAME = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-        return _LAST_GOOD_FRAME
+        return _cache_or_none()
     except Exception as e:
         print(f"screen_capture (PIL): {type(e).__name__}: {e}")
-        return _LAST_GOOD_FRAME  # keep session alive during transient failures
+        return _cache_or_none()  # keep session alive during transient failures
 
 
 # ---------------------------------------------------------------------------

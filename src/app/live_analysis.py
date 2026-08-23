@@ -1703,6 +1703,10 @@ class LiveSession(threading.Thread):
         self.seq = 0
         self.note = "starting stream..."
         self.err: str | None = None
+        # 2026-08-23 (B2): per-stage tick timing exposed on the JSON
+        # payload so the HUD can show real end-to-end latency instead
+        # of just the inter-tick gap.
+        self._last_stage_ms: dict = {}
         # Rolling state that SURVIVES layer switches (fix 2 point 9):
         self.tracker = None
         self.heat = [[0.0] * GRID_W for _ in range(GRID_H)]
@@ -1763,15 +1767,23 @@ class LiveSession(threading.Thread):
             while (not self.stop_event.is_set()
                    and time.time() - self.last_poll < IDLE_STOP_S):
                 t0 = time.time()
+                # 2026-08-23 (B2): per-stage timing exposed to the HUD so
+                # the operator can see real end-to-end latency, not just
+                # the inter-tick delivery gap. All stages measured in ms.
+                _st_grab = _st_infer = _st_render = _st_publish = 0.0
                 try:
+                    _t = time.time()
                     frame = self._grab()
+                    _st_grab = (time.time() - _t) * 1000.0
                     if frame is None:
                         self._publish_note("stream unavailable - retrying...")
                         if self.stop_event.wait(2.0):
                             break
                         continue
                     self._last_frame = frame   # event thumbs crop from here
+                    _t = time.time()
                     boxes = self._infer(frame)
+                    _st_infer = (time.time() - _t) * 1000.0
                     now = time.time()
                     if self.tracker is None:
                         from app.tracker import BurstTracker
@@ -1800,9 +1812,22 @@ class LiveSession(threading.Thread):
                     if layer == "faces":
                         faces_list = self._faces_pass(frame, boxes)
                     self._accumulate(frame, boxes, now)
+                    _t = time.time()
                     img = self._render(frame, faces_list, layer)
+                    _st_render = (time.time() - _t) * 1000.0
+                    _t = time.time()
                     self._publish(img)
                     self._publish_data(frame.shape, boxes, layer, faces_list)
+                    _st_publish = (time.time() - _t) * 1000.0
+                    # Latch the per-stage numbers so _publish_data picks
+                    # them up next tick (safe to read even on first tick).
+                    self._last_stage_ms = {
+                        "grab": round(_st_grab, 1),
+                        "infer": round(_st_infer, 1),
+                        "render": round(_st_render, 1),
+                        "publish": round(_st_publish, 1),
+                        "tick": round((time.time() - t0) * 1000.0, 1),
+                    }
                 except Exception as tick_err:  # noqa: BLE001
                     if not _tick_err_logged:
                         _tick_err_logged = True
@@ -2982,6 +3007,10 @@ class LiveSession(threading.Thread):
             self._append_local_history(js_boxes)
         except Exception:
             pass   # history is best-effort; never costs a tick
+        # 2026-08-23 (B2): per-stage timing from the last completed tick.
+        # Falls back to empty dict on the very first publish.
+        if self._last_stage_ms:
+            data["_stage_ms"] = self._last_stage_ms
         with self.lock:
             self.latest_data = data
 

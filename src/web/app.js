@@ -929,6 +929,8 @@ function beginTileAnalysis(st, cam, layer) {
        <b class="hud-veh" style="color:#60a5fa">-</b></span>
     <span style="${_pill}"><span style="${_lbl}">Tick</span>
        <b class="hud-tick" style="color:#fbbf24">-</b></span>
+    <span style="${_pill}" title="Per-stage tick time (ms): grab / infer / render / publish"><span style="${_lbl}">Stages ms</span>
+       <b class="hud-stages" style="color:#c4b5fd">-</b></span>
     <span style="${_pill}"><span style="${_lbl}">Alerts</span>
        <b class="hud-alerts" style="color:#f97316">0</b></span>
     <span class="analysis-status" style="color:#64748b;font-size:11px;
@@ -1018,8 +1020,14 @@ async function pollAnalysisEvents(st) {
   for (let i = 30; i < chips.length; i++) chips[i].remove();
   const cur = a.actualLayer || a.layer;
   let visible = 0;
+  // 2026-08-23 (B6): obstruction events fire in live_analysis regardless
+  // of the active layer (>=50% frame coverage, conf>=0.45) - they were
+  // being hidden here because "obstruction" is not in ANALYSIS_LAYER_DEFS.
+  // Treat obstruction as always-visible so operators actually see them.
+  const CROSS_LAYER_EVENTS = new Set(["obstruction"]);
   for (const c of a.evStrip.querySelectorAll(".event-chip")) {
-    const show = (!c.dataset.layer || c.dataset.layer === cur);
+    const lay = c.dataset.layer;
+    const show = (!lay || lay === cur || CROSS_LAYER_EVENTS.has(lay));
     c.style.display = show ? "" : "none";
     if (show) visible += 1;
   }
@@ -1573,10 +1581,12 @@ setInterval(_refreshHeaderMetricsLine, 10000);
 
 function _updateAnalysisHud(a, d) {
   if (!a || !(a.bar || a.wrap)) return;
-  const p = (a.bar || a.wrap).querySelector(".hud-people");
-  const v = (a.bar || a.wrap).querySelector(".hud-veh");
-  const t = (a.bar || a.wrap).querySelector(".hud-tick");
-  const m = (a.bar || a.wrap).querySelector(".hud-model");
+  const root = (a.bar || a.wrap);
+  const p = root.querySelector(".hud-people");
+  const v = root.querySelector(".hud-veh");
+  const t = root.querySelector(".hud-tick");
+  const s = root.querySelector(".hud-stages");
+  const m = root.querySelector(".hud-model");
   if (p) p.textContent = String(d.person ?? "-");
   if (v) v.textContent = String(d.vehicles ?? "-");
   if (t) {
@@ -1587,6 +1597,18 @@ function _updateAnalysisHud(a, d) {
     // tick often runs 0.5-4s apart.
     const gap = a._gapEma || null;
     t.textContent = gap ? gap.toFixed(1) + "s / tick" : "-";
+  }
+  // 2026-08-23 (B2): per-stage tick ms from the backend, so operators
+  // can see WHICH stage is the bottleneck instead of a single number.
+  // Format: "grab / infer / render / publish" (ms each, no decimals).
+  if (s) {
+    const sm = d._stage_ms;
+    if (sm && typeof sm === "object") {
+      const fmt = (x) => x == null ? "-" : Math.round(x);
+      s.textContent = `${fmt(sm.grab)} / ${fmt(sm.infer)} / ${fmt(sm.render)} / ${fmt(sm.publish)}`;
+    } else {
+      s.textContent = "-";
+    }
   }
   if (m && _hudSystemInfo && _hudSystemInfo.model) {
     m.textContent = _hudSystemInfo.model;
@@ -1687,6 +1709,33 @@ function _syncAnalysisBgVisibility(st) {
     a.canvas.style.display = playing ? "" : "none";
     if (want === "block") _refreshAnalysisBg(a);
   }
+  // 2026-08-23 (B3): stream-stalled ribbon. If no new analysis payload
+  // in > 3s (backend cache is looping on _LAST_GOOD_FRAME, or the
+  // screen-capture branch is silently reusing the same pixels), show
+  // an obvious red bar over the video so operators do not stare at a
+  // "live" chip while the pipeline is dead.
+  const STALE_MS = 3000;
+  const fresh = a._lastFreshMs || 0;
+  const stale = fresh > 0 && (Date.now() - fresh) > STALE_MS;
+  let ribbon = st.videoWrap.querySelector(".analysis-stall-ribbon");
+  if (stale) {
+    if (!ribbon) {
+      ribbon = document.createElement("div");
+      ribbon.className = "analysis-stall-ribbon";
+      ribbon.style.cssText =
+        "position:absolute;top:0;left:0;right:0;padding:8px 12px;" +
+        "background:rgba(220,38,38,0.92);color:#fff;font:600 13px system-ui;" +
+        "text-align:center;z-index:70;pointer-events:none;";
+      st.videoWrap.style.position = st.videoWrap.style.position || "relative";
+      st.videoWrap.appendChild(ribbon);
+    }
+    const ageS = Math.round((Date.now() - fresh) / 1000);
+    ribbon.textContent =
+      `Stream stalled - no fresh frame in ${ageS}s ` +
+      `(check backend or reload the tab)`;
+  } else if (ribbon) {
+    ribbon.remove();
+  }
 }
 
 async function pollAnalysisFrame(st) {
@@ -1717,6 +1766,11 @@ async function pollAnalysisFrame(st) {
       }
       if (d.seq !== a.lastSeq) {
         a.lastSeq = d.seq;
+        // 2026-08-23 (B3): record wall-clock of the last real payload
+        // update; a client-side check below uses this to show a
+        // "Stream stalled" ribbon when the analysis loop stops
+        // producing new frames.
+        a._lastFreshMs = Date.now();
         const prevTick = a.tickBuf[a.tickBuf.length - 1];
         if (prevTick) {
           const gap = (d.at || 0) - (prevTick.at || 0);
@@ -2102,6 +2156,13 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
   for (const b of d.boxes || []) {
     if (d.layer === "faces") continue;
     if (d.layer === "heat") break;
+    // 2026-08-23 (B4): line/parking/fire layers used to paint generic
+    // detection boxes on the canvas that the backend JPEG never draws;
+    // the mismatch looked like phantom "extra" boxes to operators. Skip
+    // the generic pass on those layers - the layer-specific renderers
+    // above already draw the pieces the operator cares about
+    // (crossings/pills, occupancy polygons, fire hits).
+    if (d.layer === "line" || d.layer === "parking" || d.layer === "fire") continue;
     const isPose = (d.layer === "pose" || d.layer === "gestures");
     if (isPose && b.cls !== "person") continue;
     if (d.layer === "body" && !b.flag) continue;
@@ -2368,14 +2429,19 @@ function computeActivity(rows) {
   const pIdx   = _bandIndex(people, ACTIVITY_BANDS);
   const vIdx   = _bandIndex(load, VEHICLE_BANDS);
   const idx    = Math.max(pIdx, vIdx);
-  const label = idx <= 3 ? "Quiet"
-              : idx <= 6 ? "Moderate"
-              : idx <= 8 ? "Busy"
-              : "Crowded";
+  // 2026-08-23 (B1b): the old label ("Quiet / Moderate / Busy /
+  // Crowded") used fixed bands identical for every camera, so a
+  // single-lane alley with one truck scored the same as a six-lane
+  // highway with one truck. Replace with a HONEST, camera-agnostic
+  // readout: raw median vehicle count + median people, plus the
+  // (kept-for-color) 0-10 idx so the chip still colours by band.
+  // Operators reading two cameras side-by-side can now compare.
   const last = rows[rows.length - 1];
+  const veh = last.vehicles ?? 0;
+  const label = `${veh} veh · ${people} ppl`;
   return { idx, label, pIdx, vIdx,
            now: last.person ?? 0,
-           veh: last.vehicles ?? 0,
+           veh,
            load: Math.round(load * 10) / 10 };
 }
 
