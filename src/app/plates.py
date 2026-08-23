@@ -741,6 +741,15 @@ def attach_plates(det_model, ocr: "_MultiScriptOcr", frame, tracker,
             best_text = ""
             best_conf = 0.0
 
+        # 2026-08-23 (C1c): temporal agreement counter. Every OCR read
+        # (best-of-crop-buffer, whichever "won" this tick) increments a
+        # per-text counter for this track. Downstream _plates_pass emits
+        # only when the current text has been seen at least AGREEMENT_MIN
+        # times, sharply reducing single-frame hallucinations like
+        # "104E" / "2017" that a low conf gate would otherwise pass.
+        if best_text:
+            hist = entry.setdefault("text_counts", {})
+            hist[best_text] = hist.get(best_text, 0) + 1
         # Best-read-wins across the whole crop buffer AND all prior
         # attempts on the entry.
         if best_text and best_conf > entry.get("conf", 0):

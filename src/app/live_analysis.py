@@ -156,10 +156,14 @@ NIGHT_LUMA_OFF = 80.0
 HEAT_HALF_LIFE_S = 180.0   # dwell-heat half-life (recent-activity view)
 
 # cam_id -> seconds between wall clock and the stream's PROGRAM-DATE-TIME
-# live edge, measured by dashboard_server's /ytproxy manifest handler on
-# every playlist refresh. Lets _publish_data stamp each tick with the
-# capture time in the VIDEO's own clock, so the browser can align boxes
-# with the exact frame the operator is watching.
+# live edge. Was meant to be populated by dashboard_server's /ytproxy
+# manifest handler on every playlist refresh so _publish_data could stamp
+# each tick with capture time in the VIDEO's own clock. The /ytproxy
+# writer was never wired in - `grep STREAM_PDT_OFFSET\[` returns zero
+# writes anywhere in the tree (verified in AUDIT_2026-08-23). Left in
+# place so the read-side default of 0.0 keeps working; the map stays
+# empty which is exactly what we want until the writer is implemented.
+# See C3c in AUDIT_HE_2026-08-23.md for the follow-up plan.
 STREAM_PDT_OFFSET: dict[str, float] = {}
 JPEG_MAX_W = 960
 JPEG_QUALITY = 80
@@ -195,6 +199,11 @@ CROSSING_COOLDOWN_S = 2.0
 # sessions + the one-shot deep window): ultralytics predict is not
 # thread-safe on a shared model object.
 INFER_LOCK = threading.Lock()
+# 2026-08-23 (C1a): serialize read-modify-write on saved.json across
+# every LiveSession + every save_event caller thread. Without this the
+# gallery got duplicate rows when two auto-saves landed within one
+# tick boundary (see bug #2 in AUDIT_2026-08-23.md).
+_SAVED_JSON_LOCK = threading.Lock()
 
 # Body-anomaly layer: which behavior labels count as an anomaly worth
 # drawing. "running" was removed 2026-08-18: normal fast walking often
@@ -2022,9 +2031,33 @@ class LiveSession(threading.Thread):
         # this cleanly separates "same car staying visible" from
         # "different car passing later".
         PLATE_TID_DEDUP_S = 300.0
+        # 2026-08-23 (C1b): cross-track string dedup. If a plate string
+        # was already emitted within PLATE_STR_DEDUP_S seconds, suppress
+        # it even if a NEW tid produced it (happens when the tracker
+        # splits a car under obstruction bail / fast motion). Normalized
+        # to fold common OCR mixups (O/0, I/1, S/5, B/8) so "20H6863"
+        # and "20H68G3" dedupe to the same slot.
+        PLATE_STR_DEDUP_S = 30.0
+        # 2026-08-23 (C1c): temporal agreement gate. A tid's read must
+        # be observed at least AGREEMENT_MIN times (across OCR ticks)
+        # before we emit it to the gallery. Cuts single-frame OCR
+        # hallucinations without needing a higher confidence gate.
+        AGREEMENT_MIN = 2
         if not hasattr(self, "_plate_emitted"):
             # tid -> last_saved_ts (float)
             self._plate_emitted: dict[int, float] = {}
+        if not hasattr(self, "_plate_str_emitted"):
+            # normalized_text -> last_saved_ts (float)
+            self._plate_str_emitted: dict[str, float] = {}
+
+        def _normalize_plate(s: str) -> str:
+            t = "".join(ch for ch in (s or "").upper()
+                        if ch.isalnum())
+            # Fold common OCR mixups so near-duplicates dedupe.
+            t = (t.replace("O", "0").replace("I", "1")
+                  .replace("S", "5").replace("B", "8"))
+            return t
+
         _now_dedup = time.time()
         if len(self._plate_emitted) >= PLATE_AUTO_SAVE_CAP:
             return
@@ -2040,7 +2073,25 @@ class LiveSession(threading.Thread):
             _last_ts = self._plate_emitted.get(tid, 0.0)
             if _now_dedup - _last_ts < PLATE_TID_DEDUP_S:
                 continue
+            # C1c: require the current text to have been read at least
+            # AGREEMENT_MIN times for this tid before we trust it enough
+            # to emit. `text_counts` is populated in plates.attach_plates
+            # on every OCR pass (any read, not only best-so-far).
+            _reads = self._plate_reads.get(tid, {}) if hasattr(self, "_plate_reads") else {}
+            _counts = _reads.get("text_counts", {}) if isinstance(_reads, dict) else {}
+            if _counts.get(text, 0) < AGREEMENT_MIN:
+                continue
+            # C1b: cross-track dedup on the normalized string.
+            _norm = _normalize_plate(text)
+            _last_str_ts = self._plate_str_emitted.get(_norm, 0.0)
+            if _norm and _now_dedup - _last_str_ts < PLATE_STR_DEDUP_S:
+                # Still counts as "handled" for this tid so we don't
+                # burn CPU re-checking every tick until the window ends.
+                self._plate_emitted[tid] = _now_dedup
+                continue
             self._plate_emitted[tid] = _now_dedup
+            if _norm:
+                self._plate_str_emitted[_norm] = _now_dedup
             box = {"x1": pbox[0], "y1": pbox[1],
                    "x2": pbox[2], "y2": pbox[3]}
             try:
@@ -3301,13 +3352,21 @@ class LiveSession(threading.Thread):
                "text": ev["text"], "ts": ev["ts"],
                "image": f"snapshots/detections/{fn}"}
         man = base / "saved.json"
-        try:
-            items = json.loads(man.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            items = []
-        items.insert(0, row)
-        man.write_text(json.dumps(items[:500], ensure_ascii=False),
-                       encoding="utf-8")
+        # 2026-08-23 (C1a): serialize the read-modify-write of saved.json
+        # under a module-level lock. Two auto-save emits from consecutive
+        # ticks (the same plate that survived dedup - or two different
+        # events that share a tick boundary) could both read stale
+        # items, both insert their row, then race on write - the second
+        # write would clobber the first row. Observed: `UU730 (0.63)`
+        # saved twice with ts 62 ms apart (bug #2 in AUDIT_2026-08-23).
+        with _SAVED_JSON_LOCK:
+            try:
+                items = json.loads(man.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                items = []
+            items.insert(0, row)
+            man.write_text(json.dumps(items[:500], ensure_ascii=False),
+                           encoding="utf-8")
         with self.lock:
             ev["saved"] = True
         return row

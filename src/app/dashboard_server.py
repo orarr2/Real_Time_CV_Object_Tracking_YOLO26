@@ -46,6 +46,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
 SNAPSHOTS_DIR = WEB_DIR / "snapshots"
+# 2026-08-23 (C2): the plates layer writes per-attempt crops to
+# src/data/plate_crops/<cam>/<ts>_<tid>_<text>_<conf>.jpg as an audit
+# trail. The Investigation LPR pipeline modal reads from here through
+# a dedicated /plate-crops/<cam>/<file> path so B/C/D panels show real
+# per-stage crops instead of CSS crops of the same saved JPEG.
+PLATE_CROPS_DIR = ROOT / "data" / "plate_crops"
 # Fixture frames the review-pool bootstrap seeds from. They're real
 # captures from the four production cameras (see src/docs/images/), so
 # the crops the first-time user reviews look exactly like what the
@@ -320,9 +326,18 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if self.path.startswith("/tvkur/"):
             self._proxy_tvkur()
             return
+        # 2026-08-23 (C2): serve the per-attempt plate crops for the
+        # Investigation LPR pipeline modal. Path layout is
+        # /plate-crops/<cam>/<file>.jpg -> src/data/plate_crops/<cam>/<file>.
+        if self.path.startswith("/plate-crops/"):
+            self._serve_plate_crop()
+            return
         path = self.path.split("?")[0]
         if path == "/api/catalog":
             self._catalog()
+            return
+        if path == "/api/analysis/plate-crops":
+            self._analysis_plate_crops()
             return
         if path == "/api/uploaded-videos":
             self._uploaded_videos()
@@ -1147,6 +1162,112 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             items = []
         self._send_json(200, {"items": items})
 
+    def _analysis_plate_crops(self) -> None:
+        """GET /api/analysis/plate-crops?cam=X[&tid=Y][&ts=T][&limit=N]
+        Return the newest saved plate crops for a camera, optionally
+        filtered to a specific track id or to entries whose ts (in the
+        filename) is near the requested wall-clock. Payload:
+          { "ok": True, "cam": "X", "count": N,
+            "items": [{"url": "/plate-crops/<cam>/<file>",
+                       "ts": 1787..., "tid": 42, "text": "AB123",
+                       "conf_pct": 63}, ...] }
+        The Investigation LPR pipeline modal calls this to fill panels
+        B/C/D with the REAL per-attempt crops instead of CSS crops of
+        the single saved event JPEG (see AUDIT_2026-08-23.md bug #3).
+        """
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        cam = (q.get("cam") or [""])[0].strip()
+        tid_s = (q.get("tid") or [""])[0].strip()
+        ts_s = (q.get("ts") or [""])[0].strip()
+        limit = 5
+        try:
+            limit = max(1, min(20, int((q.get("limit") or ["5"])[0])))
+        except ValueError:
+            pass
+        if not cam:
+            self._send_json(400, {"error": "cam required"})
+            return
+        import re as _re
+        _safe = _re.compile(r"[^A-Za-z0-9._-]+")
+        safe_cam = _safe.sub("_", cam) or "cam"
+        cam_dir = PLATE_CROPS_DIR / safe_cam
+        try:
+            files = sorted(cam_dir.glob("*.jpg"),
+                           key=lambda p: p.stat().st_mtime,
+                           reverse=True)
+        except OSError:
+            files = []
+        items = []
+        fn_re = _re.compile(r"^(\d+)_(\d+)_(.+)_(\d{2})\.jpg$")
+        want_tid = None
+        try:
+            want_tid = int(tid_s) if tid_s else None
+        except ValueError:
+            pass
+        want_ts_ms = None
+        try:
+            want_ts_ms = int(float(ts_s) * 1000) if ts_s else None
+        except ValueError:
+            pass
+        for p in files:
+            m = fn_re.match(p.name)
+            if not m:
+                continue
+            ts_ms, tid, text, conf_pct = m.groups()
+            tid_i = int(tid)
+            if want_tid is not None and tid_i != want_tid:
+                continue
+            if want_ts_ms is not None:
+                # Include crops within +/- 10 s of the requested ts. LPR
+                # ticks buffer up to 5 sharpest crops per track over a
+                # few seconds, so this window comfortably covers one
+                # detection's whole burst.
+                if abs(int(ts_ms) - want_ts_ms) > 10_000:
+                    continue
+            items.append({
+                "url": f"/plate-crops/{safe_cam}/{p.name}",
+                "ts": int(ts_ms) / 1000.0,
+                "tid": tid_i,
+                "text": text,
+                "conf_pct": int(conf_pct),
+            })
+            if len(items) >= limit:
+                break
+        self._send_json(200, {"ok": True, "cam": cam,
+                              "count": len(items), "items": items})
+
+    def _serve_plate_crop(self) -> None:
+        """GET /plate-crops/<cam>/<file>.jpg -> serve from
+        src/data/plate_crops/<cam>/<file>. Read-only, jpg-only."""
+        from urllib.parse import unquote
+        raw = self.path.split("?")[0]
+        rel = unquote(raw[len("/plate-crops/"):])
+        parts = rel.split("/")
+        if (len(parts) != 2 or ".." in parts
+                or not parts[0] or not parts[1]
+                or not parts[1].endswith(".jpg")):
+            self.send_error(400, "bad plate crop path")
+            return
+        import re as _re
+        _safe = _re.compile(r"[^A-Za-z0-9._-]+")
+        cam, fname = parts
+        if _safe.sub("", cam) != cam or _safe.sub("", fname) != fname:
+            self.send_error(400, "bad plate crop path")
+            return
+        p = PLATE_CROPS_DIR / cam / fname
+        try:
+            body = p.read_bytes()
+        except OSError:
+            self.send_error(404, "plate crop not found")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=60")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _analysis_saved_delete(self) -> None:
         """POST /api/analysis/saved-delete?id=<event_id> - remove ONE saved
         event: drop its row from saved.json and unlink its jpg. Operator-
@@ -1167,6 +1288,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             items = _json.loads(man.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             items = []
+        # 2026-08-23 (C1a): guard the whole read-modify-write of saved.json
+        # under the shared lock so a concurrent auto-save (from the plates
+        # tick loop) cannot re-insert the row we are about to delete.
+        try:
+            from app.live_analysis import _SAVED_JSON_LOCK
+        except Exception:
+            _SAVED_JSON_LOCK = None
         removed_row = None
         kept = []
         for it in items:
@@ -1194,7 +1322,11 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     except OSError:
                         pass
         try:
-            man.write_text(_json.dumps(kept), encoding="utf-8")
+            if _SAVED_JSON_LOCK is not None:
+                with _SAVED_JSON_LOCK:
+                    man.write_text(_json.dumps(kept), encoding="utf-8")
+            else:
+                man.write_text(_json.dumps(kept), encoding="utf-8")
         except OSError as e:
             self._send_json(500, {"ok": False,
                                   "error": f"{type(e).__name__}: {e}"})
@@ -1241,7 +1373,18 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                             pass
             man = det_dir / "saved.json"
             man.parent.mkdir(parents=True, exist_ok=True)
-            man.write_text(_json.dumps([]), encoding="utf-8")
+            # 2026-08-23 (C1a): same lock as save_event so a concurrent
+            # auto-save cannot slip a row in between our read of an
+            # empty tree and our write of an empty manifest.
+            try:
+                from app.live_analysis import _SAVED_JSON_LOCK
+            except Exception:
+                _SAVED_JSON_LOCK = None
+            if _SAVED_JSON_LOCK is not None:
+                with _SAVED_JSON_LOCK:
+                    man.write_text(_json.dumps([]), encoding="utf-8")
+            else:
+                man.write_text(_json.dumps([]), encoding="utf-8")
         except Exception as e:
             self._send_json(500, {"ok": False,
                                   "error": f"{type(e).__name__}: {e}"})

@@ -1259,6 +1259,60 @@ function openPipelineModal(it) {
   enhanceInput.addEventListener("change",
     () => paintStages(img, stageEls, enhanceInput.checked));
   img.src = it.image;
+  // 2026-08-23 (C2): try to fetch the REAL per-attempt plate crops
+  // saved during the OCR pass. When found, overlay panels B/C/D with
+  // actual plate crops (with the OCR text baked in as a caption bar).
+  // Failure is soft: the CSS-cropped fallback above still renders.
+  (async () => {
+    if (!it || !it.cam) return;
+    try {
+      const params = new URLSearchParams({ cam: it.cam, limit: "5" });
+      if (it.ts) params.set("ts", String(it.ts));
+      const r = await fetch(`/api/analysis/plate-crops?${params}`,
+                            { cache: "no-store" });
+      if (!r.ok) return;
+      const j = await r.json();
+      const items = (j && j.items) || [];
+      if (!items.length) return;
+      const label = box.querySelector("[data-lpr-close]").previousElementSibling;
+      const captionRow = document.createElement("div");
+      captionRow.style.cssText =
+        "grid-column:1/-1;padding:6px 10px;background:#0a0f1c;" +
+        "border:1px solid #1e293b;border-radius:8px;color:#94a3b8;" +
+        "font-size:11px;line-height:1.4";
+      captionRow.textContent =
+        `Real plate crops (src/data/plate_crops): ${items.length} sample(s) ` +
+        `for this detection. Panels B/C/D now show the actual crops the ` +
+        `OCR pass saw instead of a CSS crop of the saved event frame.`;
+      const grid = box.querySelector(
+        "div[style*='grid-template-columns']");
+      if (grid) grid.prepend(captionRow);
+      const overlayCrop = (idx, url) => {
+        const cvs = stageEls[idx];
+        if (!cvs || !url) return;
+        const im = new Image();
+        im.crossOrigin = "anonymous";
+        im.onload = () => {
+          const w = im.naturalWidth || 1;
+          const h = im.naturalHeight || 1;
+          cvs.width = w; cvs.height = h;
+          cvs.style.aspectRatio = `${w}/${h}`;
+          const ctx = cvs.getContext("2d");
+          ctx.filter = "none";
+          ctx.drawImage(im, 0, 0);
+        };
+        im.src = url;
+      };
+      // Panel B = newest crop. Panel C = second-newest. Panel D =
+      // third-newest OR a 2x-upscaled newest for eyeball comparison.
+      overlayCrop(1, items[0] && items[0].url);
+      overlayCrop(2, (items[1] || items[0]) && (items[1] || items[0]).url);
+      // Panel D: pick the crop with the HIGHEST conf_pct (best read).
+      const best = items.slice().sort(
+        (a, b) => (b.conf_pct || 0) - (a.conf_pct || 0))[0];
+      overlayCrop(3, best && best.url);
+    } catch (_) { /* silent: fallback stays visible */ }
+  })();
 }
 
 function paintStages(img, canvases, enhance) {
