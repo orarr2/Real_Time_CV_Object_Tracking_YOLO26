@@ -4,12 +4,7 @@ Run from src/:  python -m pytest tests -q
 """
 import pytest
 
-from app.behavior import (
-    _boxes_of_last_frame,
-    attach_neighbor_stats,
-    render_window,
-    track_stats,
-)
+from app.behavior import track_stats
 from app.tracker import Track
 
 SHAPE = (360, 640)
@@ -79,32 +74,7 @@ def test_zones_follow_the_path():
     assert all("," in z for z in s["zones"])
 
 
-def test_neighbor_stats_same_class_only():
-    a = _track(1, [(100, 100), (140, 100)])
-    b = _track(2, [(200, 100), (240, 100)])           # 100px to the right
-    c = _track(3, [(100, 300), (140, 300)])
-    c.cls = "car"
-    for tr in (a, b):
-        assert tr.cls == "person"
-    stats = [track_stats(t.cls, t.boxes, t.times, SHAPE) for t in (a, b, c)]
-    attach_neighbor_stats([a, b, c], stats)
-    assert stats[0]["nn_min_px"] == pytest.approx(100.0)
-    assert stats[1]["nn_min_px"] == pytest.approx(100.0)
-    assert stats[2]["nn_min_px"] is None              # only car in view
 
 
-def test_boxes_of_last_frame_picks_survivors():
-    a = _track(1, [(0, 0), (10, 0), (20, 0)])         # lives to t=1.0
-    b = _track(2, [(300, 300)])                       # died at t=0
-    picked = _boxes_of_last_frame([a, b])
-    assert picked == [a.boxes[-1]]
 
 
-def test_render_window_draws_something():
-    import numpy as np
-    frames = [np.zeros((360, 640, 3), dtype=np.uint8) for _ in range(3)]
-    tr = _track(1, [(100 + 60 * i, 100) for i in range(3)])
-    tr.boxes[-1]["track_id"] = tr.tid
-    out = render_window(frames, [tr])
-    assert out.shape == frames[0].shape
-    assert out.sum() > 0

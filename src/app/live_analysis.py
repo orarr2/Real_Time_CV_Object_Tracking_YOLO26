@@ -475,7 +475,7 @@ def update_crossings(side_state: dict, tracks, frame_shape, line: list,
     None - the next tick with a real sign starts the comparison from
     there). A crossing = a strict sign flip between two consecutive
     signed observations. Same convention as
-    detect_core.count_line_crossings: negative -> positive side of the
+    line-crossing convention: negative -> positive side of the
     A->B line = "in".
 
     on_event(direction, track, frame): optional callback fired on each

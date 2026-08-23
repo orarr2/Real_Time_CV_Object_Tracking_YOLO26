@@ -5,17 +5,11 @@ opencv-contrib-python>=4.9  # dnn_superres for ESPCN 4x plate super-resolution
 
 # Live stream access
 yt-dlp>=2024.4.9            # resolves YouTube Live -> HLS (.m3u8) URLs
-streamlink>=6.7.0           # alternative resolver for many live platforms
-requests>=2.31              # snapshot/JPEG cameras + REST camera APIs
 
 # Notebook analysis + calibration
 pandas>=2.2
 numpy>=1.26
 matplotlib>=3.8
-python-dateutil>=2.9
-
-# Reports (local PDF generation)
-reportlab>=4.0
 Pillow>=10.0
 
 # System telemetry (CPU / RAM live HUD above the video player)

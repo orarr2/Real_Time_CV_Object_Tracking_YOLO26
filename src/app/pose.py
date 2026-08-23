@@ -21,7 +21,7 @@ Design constraints, in order:
     round never loads it unless the operator passes `--pose` (two YOLO
     models + the OSNet embedder do not fit the 1 GB e2-micro; the flag is
     for >=2 GB hosts). The natural home is the on-demand deep window
-    (`behavior.analyze_window(pose=True)`), which already accepts the cost
+    (the pose-enabled analysis path), which already accepts the cost
     of extra inference per click.
 
 This module imports nothing heavy at module level so the pure matching

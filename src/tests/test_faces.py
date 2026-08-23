@@ -34,25 +34,7 @@ def test_missing_file_is_unavailable(monkeypatch, tmp_path):
     assert m.available() is False
 
 
-def test_maybe_blur_disabled_returns_same_object():
-    m = _fresh()
-    frame = object()                      # never touched when disabled
-    assert m.BLUR_ENABLED is False
-    assert m.maybe_blur(frame) is frame
 
 
-def test_maybe_blur_enabled_but_unavailable_is_noop(monkeypatch):
-    m = _fresh()
-    monkeypatch.delenv(m.FACE_MODEL_ENV, raising=False)
-    m.BLUR_ENABLED = True
-    frame = object()                      # would explode if cv2 touched it
-    assert m.maybe_blur(frame) is frame
 
 
-def test_maybe_blur_never_raises(monkeypatch):
-    m = _fresh()
-    m.BLUR_ENABLED = True
-    monkeypatch.setattr(m, "blur_faces",
-                        lambda f: (_ for _ in ()).throw(RuntimeError("boom")))
-    frame = object()
-    assert m.maybe_blur(frame) is frame

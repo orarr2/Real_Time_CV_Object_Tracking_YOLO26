@@ -521,6 +521,9 @@ def _save_plate_crop(cam_id: str, tid: int, plate_bgr,
     dest = _PLATE_CROPS_ROOT / safe_cam / fname
     try:
         import cv2, numpy as np
+    except ImportError:
+        return
+    try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         # Burn a compact overlay onto the saved crop: 1) a thin green
         # rectangle marking the plate region (which IS the whole crop,

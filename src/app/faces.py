@@ -20,7 +20,6 @@ Detector: OpenCV's bundled YuNet (cv2.FaceDetectorYN) driving a ~230 KB
 ONNX file - no new python dependency. The model file is NOT committed;
 point `FACE_MODEL` at a downloaded copy (see README). Everything here
 degrades to a silent no-op when the file or the cv2 API is absent:
-`available()` returns False, `maybe_blur()` returns the frame untouched,
 `detect_faces()` returns []. A missing optional model must never cost a
 sample.
 """
@@ -41,11 +40,9 @@ FACE_SCORE = 0.60
 FACE_NMS = 0.30
 # Gaussian kernel is sized from the face box itself (an odd fraction of
 # its width) so near faces get a heavy blur and far ones are not wasted on.
-BLUR_KERNEL_FRAC = 0.8
 
 # Flipped by the collector's --blur-faces flag; module-level so every
 # save-path helper sees one switch.
-BLUR_ENABLED = False
 
 _detector = None
 _failed = False
@@ -119,38 +116,8 @@ def detect_faces(frame) -> list[dict]:
     return out
 
 
-def blur_faces(frame, faces: list[dict] | None = None):
-    """A COPY of `frame` with every face region gaussian-blurred.
-    Detects when `faces` is not supplied. The original is never touched -
-    callers that need the sharp frame (detection, re-ID) keep theirs."""
-    import cv2
-
-    if faces is None:
-        faces = detect_faces(frame)
-    if not faces:
-        return frame
-    out = frame.copy()
-    for f in faces:
-        x1, y1 = max(0, int(f["x1"])), max(0, int(f["y1"]))
-        x2 = min(out.shape[1], int(f["x2"]))
-        y2 = min(out.shape[0], int(f["y2"]))
-        if x2 <= x1 or y2 <= y1:
-            continue
-        k = max(5, int((x2 - x1) * BLUR_KERNEL_FRAC) | 1)
-        out[y1:y2, x1:x2] = cv2.GaussianBlur(out[y1:y2, x1:x2], (k, k), 0)
-    return out
 
 
-def maybe_blur(frame):
-    """The save-path hook: blur when --blur-faces is on AND the detector
-    is usable, otherwise return the frame unchanged. Never raises - a
-    privacy feature must not be able to break sampling."""
-    if not BLUR_ENABLED:
-        return frame
-    try:
-        return blur_faces(frame)
-    except Exception:
-        return frame
 
 
 def draw_faces(img, faces: list[dict]):

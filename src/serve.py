@@ -6,7 +6,7 @@
 
 The dashboard at web/index.html is a static page served with a small
 threaded HTTP handler. It talks to the local /api/* endpoints (analysis,
-uploads, model metrics, review workflow, gallery) provided by
+uploads, model info, gallery) provided by
 app/dashboard_server.py - no cloud, no Firestore, no external SDK.
 
 Pick a camera in the header dropdown (or upload an MP4/MKV via the upload

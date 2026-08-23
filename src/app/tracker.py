@@ -14,7 +14,7 @@ position:
     per-axis velocity; its centroid is extrapolated to the new frame's
     timestamp BEFORE matching. Two neighbors walking toward each other
     stay themselves instead of swapping ids the way plain nearest-centroid
-    matching (track_burst) lets them;
+    matching lets them;
   * two-stage association - confident detections claim tracks first; the
     leftovers (detections that barely cleared their class gate) may only
     EXTEND existing tracks, never START one. A half-occluded pedestrian

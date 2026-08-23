@@ -56,3 +56,12 @@ env/
 
 # Logs
 *.log
+
+# Session/runtime artifacts + local tooling (2026-08-23 cleanup)
+src/data/calibration/
+src/data/crossings/
+src/data/events/
+src/data/lines/
+src/data/plate_crops/
+src/data/*.db
+src/data/*.csv

@@ -250,14 +250,6 @@ def system_info() -> dict:
         "screen_capture": sc_info,
     }
 
-# Model input size the collector runs at. YOLO's 640 default shrinks a distant
-# pedestrian on these wide street shots to a handful of pixels and the model
-# undercounts badly (3 visible cars -> 1 detected). 960 costs ~2.3x the CPU
-# time per frame - still a fraction of the collector's sampling interval - and
-# recovers most of the small/far objects. Pass imgsz=None to use the model's
-# own default (the notebook's quick cells do that).
-DEFAULT_IMGSZ = 960
-
 
 def load_model(weights: str = "yolov8s.pt"):
     """Load a YOLO model once and reuse it.
@@ -1152,51 +1144,6 @@ def _centroid(b: dict) -> tuple[float, float]:
     return (b["x1"] + b["x2"]) / 2.0, (b["y1"] + b["y2"]) / 2.0
 
 
-def track_burst(frames_boxes: list[list[dict]], frame_shape,
-                max_move_frac: float = 0.12) -> list[list[dict]]:
-    """Greedy nearest-centroid matching of boxes across burst frames.
-
-    Returns tracks: each a list of same-class boxes, one per frame the object
-    was matched in (consecutive frames only - a miss ends the track).
-    `max_move_frac` caps the allowed centroid move between burst frames as a
-    fraction of the frame diagonal (objects teleporting further are different
-    objects).
-    """
-    if not frames_boxes:
-        return []
-    H, W = frame_shape[:2]
-    budget = max_move_frac * (H * H + W * W) ** 0.5
-    tracks: list[list[dict]] = [[b] for b in frames_boxes[0]]
-    open_tracks = list(tracks)
-    for boxes in frames_boxes[1:]:
-        candidates = []
-        for ti, t in enumerate(open_tracks):
-            tx, ty = _centroid(t[-1])
-            for bi, b in enumerate(boxes):
-                if b["cls"] != t[-1]["cls"]:
-                    continue
-                bx, by = _centroid(b)
-                d = ((bx - tx) ** 2 + (by - ty) ** 2) ** 0.5
-                if d <= budget:
-                    candidates.append((d, ti, bi))
-        candidates.sort()
-        used_t, used_b = set(), set()
-        next_open: list[list[dict]] = []
-        for d, ti, bi in candidates:
-            if ti in used_t or bi in used_b:
-                continue
-            used_t.add(ti); used_b.add(bi)
-            open_tracks[ti].append(boxes[bi])
-            next_open.append(open_tracks[ti])
-        for bi, b in enumerate(boxes):
-            if bi not in used_b:
-                t = [b]
-                tracks.append(t)
-                next_open.append(t)
-        open_tracks = next_open
-    return tracks
-
-
 # ---- Burst-based vehicle speed estimation --------------------------------------
 # Rides the same 3-frame burst (frames ~stride/fps apart) and the same greedy
 # centroid tracks. The trick that avoids per-camera calibration: every vehicle
@@ -1208,10 +1155,6 @@ def track_burst(frames_boxes: list[list[dict]], frame_shape,
 # band is roughly +-30-50%. Good for "crawling vs city-speed vs fast", not
 # for issuing speeding tickets - the UI labels it accordingly.
 
-VEHICLE_LENGTH_M = {
-    "car": 4.5, "truck": 10.0, "bus": 12.0,
-    "motorcycle": 2.2, "bicycle": 1.8, "train": 22.0,
-}
 # Typical HLS street cam frame rate; grab_burst spaces frames `stride` frames
 # apart, so dt between burst frames = stride / fps. Fallback only - _open_cap
 # records each stream's REAL container fps into _LAST_STREAM_FPS and
@@ -1226,176 +1169,12 @@ def last_stream_fps(default: float = BURST_FPS_ASSUMED) -> float:
     both callers (collector round, deep window) grab and analyze one
     camera at a time."""
     return _LAST_STREAM_FPS if _LAST_STREAM_FPS else default
-# Sanity band, km/h: below = parked/jitter (reported as 0), above = a track
-# mismatch (two different vehicles fused), discarded outright.
-SPEED_MIN_KMH = 3.0
-SPEED_MAX_KMH = 130.0
-# Vehicles at speed move further between burst frames than pedestrians, so
-# their track pass gets a wider matching budget than the default 0.12.
-SPEED_TRACK_MOVE_FRAC = 0.30
-
-
-def estimate_speeds(frames_boxes: list[list[dict]], frame_shape,
-                    stride: int = 25, fps: float = BURST_FPS_ASSUMED
-                    ) -> list[dict]:
-    """Per-vehicle speed estimates from a burst's box lists.
-
-    Returns one entry per vehicle track observed in >= 2 burst frames:
-        {"cls", "kmh", "points", "box"}   (box = last matched box, so the
-    caller can annotate the representative frame). Tracks whose implied
-    speed is impossibly high are dropped as mismatches; near-zero speeds
-    clamp to 0.0 (parked).
-    """
-    if len(frames_boxes) < 2 or stride <= 0 or fps <= 0:
-        return []
-    dt = stride / fps
-    vehicle_frames = [[b for b in boxes if b.get("cls") in VEHICLE_LENGTH_M]
-                      for boxes in frames_boxes]
-    if sum(len(f) for f in vehicle_frames) < 2:
-        return []
-    tracks = track_burst(vehicle_frames, frame_shape,
-                         max_move_frac=SPEED_TRACK_MOVE_FRAC)
-
-    def _speed_entry(track: list[dict]) -> dict | None:
-        cls = track[0].get("cls")
-        real_len = VEHICLE_LENGTH_M.get(cls)
-        if not real_len:
-            return None
-        # meters-per-pixel from the track's own boxes (mean of extents, so
-        # a size flicker between frames doesn't swing the scale).
-        exts = [max(_box_wh(b)) for b in track if max(_box_wh(b)) > 0]
-        if not exts:
-            return None
-        # Mismatch gate: a real vehicle's pixel extent barely changes over
-        # ~1s; a far car fused with a near one (the pairing error behind
-        # Beyazit's phantom "40 km/h typical" on a pedestrian plaza) shows
-        # up as a large size jump. Kill the pair instead of averaging two
-        # different rulers.
-        if max(exts) > 1.8 * min(exts):
-            return None
-        m_per_px = real_len / (sum(exts) / len(exts))
-        (x0, y0), (x1, y1) = _centroid(track[0]), _centroid(track[-1])
-        disp_px = ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
-        kmh = disp_px * m_per_px / (dt * (len(track) - 1)) * 3.6
-        if kmh > SPEED_MAX_KMH:
-            return None                   # two different vehicles fused
-        if kmh < SPEED_MIN_KMH:
-            kmh = 0.0                     # parked / detection jitter
-        return {"cls": cls, "kmh": round(kmh, 1), "points": len(track),
-                "box": track[-1],
-                # every box dict this track matched, in burst order - lets
-                # the caller tag the SAME vehicle in whichever frame it
-                # annotates (the representative frame is often not the one
-                # the track last matched in)
-                "boxes": list(track)}
-
-    out: list[dict] = []
-    for t in tracks:
-        if len(t) < 2:
-            continue
-        entry = _speed_entry(t)
-        if entry:
-            out.append(entry)
-
-    # Fallback pass toward "every vehicle gets a speed": the greedy centroid
-    # matcher skips some pairs; slow/stationary vehicles overlap themselves
-    # heavily between burst frames, so an IoU match recovers exactly the
-    # population it missed. Physics still needs TWO sightings - a vehicle
-    # visible in only one burst frame cannot carry a speed.
-    matched_last = {id(e["box"]) for e in out}
-    used_first: set[int] = set()
-    for t in tracks:
-        if len(t) >= 2:
-            used_first.add(id(t[0]))
-    for lb in vehicle_frames[-1]:
-        if id(lb) in matched_last:
-            continue
-        best, best_iou = None, 0.25
-        for fb in vehicle_frames[0]:
-            if fb is lb or id(fb) in used_first:
-                continue
-            if fb.get("cls") != lb.get("cls"):
-                continue
-            iou = box_iou(fb, lb)
-            if iou > best_iou:
-                best, best_iou = fb, iou
-        if best is None:
-            continue
-        used_first.add(id(best))
-        entry = _speed_entry([best] + [lb] * (len(vehicle_frames) - 1))
-        if entry:
-            # The padded pseudo-track repeats `lb`; the REAL sightings are
-            # exactly first + last - report those as the taggable boxes.
-            entry["boxes"] = [best, lb]
-            out.append(entry)
-    return out
-
-
-def summarize_speeds(speeds: list[dict]) -> dict | None:
-    """Aggregate estimate_speeds() output for the Firestore record:
-    {"median_kmh", "max_kmh", "moving", "tracked", "per_class": {cls: median}}.
-    Medians are over MOVING vehicles only - parked cars would drag a street's
-    "typical speed" to zero. None when nothing was tracked."""
-    if not speeds:
-        return None
-    moving = sorted(s["kmh"] for s in speeds if s["kmh"] > 0)
-    per_cls: dict[str, list[float]] = {}
-    for s in speeds:
-        if s["kmh"] > 0:
-            per_cls.setdefault(s["cls"], []).append(s["kmh"])
-    def _med(xs: list[float]) -> float:
-        return xs[len(xs) // 2] if xs else 0.0
-    return {
-        "tracked":    len(speeds),
-        "moving":     len(moving),
-        "median_kmh": round(_med(moving), 1) if moving else 0.0,
-        "max_kmh":    round(moving[-1], 1) if moving else 0.0,
-        "per_class":  {c: round(_med(sorted(v)), 1)
-                       for c, v in sorted(per_cls.items())},
-    }
 
 
 def _line_side(px: float, py: float, line: list) -> float:
     """Signed side of point vs the line A->B (cross product z)."""
     (ax, ay), (bx, by) = line
     return (bx - ax) * (py - ay) - (by - ay) * (px - ax)
-
-
-def count_line_crossings(tracks: list[list[dict]], frame_shape,
-                         line: list) -> dict:
-    """Count crossings of the normalized line by the FOOT POINT during the
-    burst. Returns {"in": n, "out": n, "person_in": ..., "vehicles_in": ...}.
-    "in" is a crossing from the negative to the positive side of A->B (pick
-    the line's point order so that "in" means into your area of interest).
-    Every strict sign flip is a separate event: a track that walked in and
-    then back out registers both. A foot point that lands exactly on the
-    line (side == 0) is ambiguous and is neither counted nor allowed to
-    reset the previous side - the same convention live_analysis.update_crossings
-    uses so the two counters stay comparable.
-    """
-    H, W = frame_shape[:2]
-    res = {"in": 0, "out": 0,
-           "person_in": 0, "person_out": 0,
-           "vehicles_in": 0, "vehicles_out": 0}
-    for t in tracks:
-        if len(t) < 2:
-            continue
-        metric = "person" if t[0].get("cls") == "person" else "vehicles"
-        prev = None
-        for b in t:
-            fx, fy = _foot_point(b)
-            side = _line_side(fx / W, fy / H, line)
-            if side == 0:
-                continue
-            if prev is not None:
-                if prev < 0 and side > 0:
-                    res["in"] += 1
-                    res[f"{metric}_in"] += 1
-                elif prev > 0 and side < 0:
-                    res["out"] += 1
-                    res[f"{metric}_out"] += 1
-            prev = side
-    return res
 
 
 # Night-time gate bump. Sodium/LED point-lights after dark make storefronts
@@ -1806,7 +1585,7 @@ def draw_boxes(frame: np.ndarray, boxes: list[dict]) -> np.ndarray:
             # viewer tell look-alike objects apart on the annotated frame.
             label = f'#{b["track_id"]} ' + label
         if "kmh" in b:
-            # burst-based estimate (see estimate_speeds) - "~" marks it as
+            # burst-based estimate - "~" marks it as
             # such; 0 means matched-but-not-moving, i.e. parked.
             label += f' ~{b["kmh"]:.0f}km/h' if b["kmh"] > 0 else " parked"
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
@@ -1857,139 +1636,6 @@ def grab_burst(stream_url: str, n: int = 3, stride: int = 25) -> list[np.ndarray
         if f is not None:
             frames = [f]
     return frames
-
-
-def median_counts(counts_list: list[dict]) -> dict:
-    """Element-wise median over per-frame count dicts, rounded to int.
-
-    Median (not mean) so one bad frame in the burst - a decode glitch, a bus
-    covering the lens - cannot drag the reported count.
-    """
-    if not counts_list:
-        return {}
-    keys: set = set()
-    for c in counts_list:
-        keys.update(c.keys())
-    out: dict = {}
-    for k in keys:
-        vals = sorted((c.get(k) or 0) for c in counts_list)
-        m = len(vals)
-        mid = vals[m // 2] if m % 2 == 1 else (vals[m // 2 - 1] + vals[m // 2]) / 2
-        out[k] = int(round(mid))
-    return out
-
-
-def detect_burst(model, frames: list[np.ndarray], conf: float = 0.35,
-                 imgsz: int | None = None,
-                 roi: list | None = None,
-                 roi_exclude: list | None = None,
-                 roi_exclude_class: dict | None = None,
-                 line: list | None = None,
-                 per_class_conf: dict | None = None,
-                 burst_stride: int = 25) -> tuple[dict, list[dict], np.ndarray, dict]:
-    """Run detection over a burst of frames and aggregate counts by median.
-
-    Returns (counts, boxes, frame, debug):
-      counts - per-class median across the burst (plus "vehicles");
-      boxes/frame - the representative frame (person count closest to the
-        median, latest wins ties) and its detections. Re-ID and snapshots use
-        that frame so they stay consistent with the reported counts;
-      debug - raw per-frame person/vehicle series for the Firestore record,
-        plus "crossings" (in/out per metric) when a `line` is configured.
-
-    `roi`/`roi_exclude` (normalized polygons) drop detections whose foot point
-    is outside the camera's area of interest BEFORE counting, so a parking lot
-    or a neighboring roof can't inflate business-activity numbers.
-    `roi_exclude_class` (dict cls -> [poly,...]) is the per-class variant:
-    "in this zone, never accept `person`" - use it for known false-positive
-    hotspots (traffic sign in the middle of the intersection, lamp post in
-    the corner) without hiding other classes that legitimately pass through.
-    `line` (normalized [[x1,y1],[x2,y2]]) counts burst-window crossings via
-    short centroid tracks - a sampled entry/exit flow rate.
-    """
-    # Opt the collector into class-aware confidence gating by default: the
-    # nano model on overhead cams loses two-wheelers and small pedestrians at a
-    # single 0.35 threshold. Callers who want the legacy single-conf behavior
-    # can pass per_class_conf={} explicitly.
-    if per_class_conf is None:
-        per_class_conf = DEFAULT_PER_CLASS_CONF
-    per: list[tuple[dict, list[dict], np.ndarray]] = []
-    for fr in frames:
-        c, b = detect_with_boxes(model, fr, conf=conf, imgsz=imgsz,
-                                 per_class_conf=per_class_conf or None)
-        if roi or roi_exclude or roi_exclude_class:
-            b = filter_boxes_roi(b, fr.shape, roi, roi_exclude,
-                                 roi_exclude_class)
-            c = counts_from_boxes(b)
-        per.append((c, b, fr))
-    counts = median_counts([c for c, _, _ in per])
-    target = counts.get("person", 0)
-    best = min(reversed(per), key=lambda t: abs((t[0].get("person") or 0) - target))
-    debug = {
-        "burst_person":   [c.get("person") for c, _, _ in per],
-        "burst_vehicles": [c.get("vehicles") for c, _, _ in per],
-    }
-    if line and len(per) >= 2:
-        tracks = track_burst([b for _, b, _ in per], per[0][2].shape)
-        debug["crossings"] = count_line_crossings(tracks, per[0][2].shape, line)
-    # Vehicle speed estimates ride the same burst. The matched boxes get a
-    # `kmh` tag in place - the representative frame's box list shares these
-    # dict objects, so every annotated surface (live view, review frame)
-    # shows the speed without a second model pass.
-    if len(per) >= 2:
-        speeds = estimate_speeds([b for _, b, _ in per], per[0][2].shape,
-                                 stride=burst_stride,
-                                 fps=last_stream_fps())
-        summary = summarize_speeds(speeds)
-        if summary:
-            debug["speeds"] = summary
-            # Every matched vehicle carries its speed - including 0.0, which
-            # the annotator renders as "parked". Unmatched single-sighting
-            # vehicles stay unlabeled (no physics without a second look).
-            # The last-matched box is not necessarily in the REPRESENTATIVE
-            # frame that gets annotated, so drawn speed labels sometimes
-            # vanished while record["speeds"] stayed correct. Tag every box
-            # the track matched - object identity, no re-matching - so the
-            # vehicle carries its speed in whichever frame is annotated.
-            for s in speeds:
-                for tb in (s.get("boxes") or (s["box"],)):
-                    tb["kmh"] = s["kmh"]
-    # Individual ids ride the same burst: a BYTE-style two-stage matcher
-    # with constant-velocity prediction (app/tracker.py) stamps each
-    # detection with a within-window `track_id`. Same shared-dict trick as
-    # the speed tags above - the representative frame's boxes carry the id
-    # into every annotated surface, so look-alike individuals (a flock, a
-    # uniform crowd) are numbered apart by position and motion, which is
-    # the only signal that separates them. Pure bookkeeping, no inference.
-    if len(per) >= 2:
-        try:
-            from app.tracker import assign_burst_ids
-            tracks = assign_burst_ids([b for _, b, _ in per],
-                                      per[0][2].shape,
-                                      dt=burst_stride / last_stream_fps())
-            if tracks:
-                debug["individuals"] = len(tracks)
-                # fix1-A12 input: how many PERSONS moved at running pace
-                # within this burst (EMA track velocity as a fraction of
-                # the frame diagonal per second; 0.12/s is the same
-                # running bar the deep window uses). Many simultaneous
-                # runners = the crowd-rush scene signal - computed from
-                # tracks that already exist, zero extra inference.
-                H_, W_ = per[0][2].shape[:2]
-                diag = (H_ * H_ + W_ * W_) ** 0.5 or 1.0
-                n_p = fast = 0
-                for tr in tracks:
-                    if tr.cls != "person" or len(tr.times) < 2:
-                        continue
-                    n_p += 1
-                    if ((tr.vx ** 2 + tr.vy ** 2) ** 0.5 / diag) >= 0.12:
-                        fast += 1
-                if n_p:
-                    debug["rush"] = {"tracked_persons": n_p,
-                                     "fast_persons": fast}
-        except Exception as e:
-            print(f"detect_burst: tracker skipped ({type(e).__name__}: {e})")
-    return counts, best[1], best[2], debug
 
 
 if __name__ == "__main__":  # one-time stream-resolution check (run on an open network)
