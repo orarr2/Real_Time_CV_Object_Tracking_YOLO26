@@ -226,12 +226,12 @@ BODY_ANOMALY_LABELS = frozenset({"fall_suspect", "erratic",
 #   min-samples 3 -> 6 (need 6 ticks of history before a first flag)
 #   cooldown 3.0s -> 8.0s (don't re-flag the same person every few ticks)
 BODY_SUDDEN_KP_IDX = (9, 10, 15, 16)
-# Operator explicitly asked to tighten these on 2026-08-20 - "still too
-# sensitive on my footage even after the earlier raises". Ratio 2.4 -> 3.0
-# means the 4-limb mean displacement now needs to be 3x the trailing
-# median before a sudden-motion fires; floor 0.45 -> 0.55 raises the
-# absolute minimum so a moderate-tempo hand wave never trips it.
-BODY_SUDDEN_RATIO = 3.0
+# Operator decision 2026-08-23: ratio 3.0 -> 8.0 (aggressive). The
+# 4-limb mean displacement must now be EIGHT times the trailing median
+# before a sudden-motion fires - only true violence-grade bursts
+# (snatch, punch, fall) clear it; every normal-motion pattern that was
+# still slipping through at 3.0 is out.
+BODY_SUDDEN_RATIO = 8.0
 BODY_SUDDEN_RING = 10
 BODY_SUDDEN_FLOOR = 0.55
 BODY_SUDDEN_MIN_SAMPLES = 6
@@ -243,12 +243,24 @@ BODY_SUDDEN_COOLDOWN_S = 8.0
 # tick counts as sudden motion too. Raised 0.35 -> 0.55 so brisk walking
 # doesn't fire; only actual running / bolting motion trips this.
 BODY_BBOX_SUDDEN_FRAC = 0.65
-BODY_BBOX_SUDDEN_MIN_SAMPLES = 6
-# Fighting detector: two person tracks within N px of each other AND
-# both trip the sudden-motion gate on the same tick. Catches punches /
-# shoves that a single-person kinematic pass can't distinguish from a
-# fast dance move.
-BODY_FIGHT_MAX_DIST_PX = 90
+# Operator decision 2026-08-23: on this hardware the body pass may
+# sample a person only once every few seconds, so ordinary walking
+# looks like a centroid "teleport" between two sparse frames. Demand a
+# real observation window - at least 10 samples spanning 10 seconds -
+# before any bbox hop is trusted.
+BODY_BBOX_SUDDEN_MIN_SAMPLES = 10
+BODY_BBOX_WINDOW_S = 10.0
+# Debounce (operator decision 2026-08-23): a spike must persist for 2
+# consecutive ticks before it may flag - single-frame jitter never fires.
+BODY_SUDDEN_STREAK = 2
+# Fighting detector (operator decision 2026-08-23): two person tracks
+# within 60 px of each other whose sudden-motion bursts happened within
+# the same short pair window AND both at genuinely high speed. Distance
+# 90 -> 60 px kills hugs / handshakes / close conversation; the pair
+# window + per-side speed floor demand that BOTH parties were bursting
+# essentially simultaneously, not one runner passing a stander.
+BODY_FIGHT_MAX_DIST_PX = 60
+BODY_FIGHT_PAIR_WINDOW_S = 2.0
 BODY_FIGHT_COOLDOWN_S = 8.0
 
 # Plate auto-save: how many unique-OCR-text plate reads a live session
@@ -2637,7 +2649,7 @@ class LiveSession(threading.Thread):
         """Fallback sudden-motion detector when pose keypoints are absent.
 
         Watches the bbox centroid. A track whose centroid darts by
-        BODY_BBOX_SUDDEN_FRAC (35% default) of its own diagonal from
+        BODY_BBOX_SUDDEN_FRAC of its own diagonal from
         one tick to the next - AFTER at least a few baseline samples -
         counts as sudden motion. Catches people RUNNING / FLEEING that
         pose can't see at their box size.
@@ -2657,20 +2669,33 @@ class LiveSession(threading.Thread):
         cy1 = (y1 + y2) / 2
         hop_frac = (((cx1 - cx0) ** 2 + (cy1 - cy0) ** 2) ** 0.5) / diag
         ring = self._body_bbox_hist.setdefault(tid, [])
-        ring.append(hop_frac)
-        if len(ring) > BODY_SUDDEN_RING:
-            del ring[:-BODY_SUDDEN_RING]
+        ring.append((now, hop_frac))
+        _cap = max(BODY_SUDDEN_RING, BODY_BBOX_SUDDEN_MIN_SAMPLES)
+        if len(ring) > _cap:
+            del ring[:-_cap]
+        # Sparse-sampling guard: without enough samples over enough real
+        # time a "hop" is just two frames far apart, not fast motion.
         if len(ring) < BODY_BBOX_SUDDEN_MIN_SAMPLES:
+            return False
+        if now - ring[0][0] < BODY_BBOX_WINDOW_S:
+            return False
+        trip = hop_frac >= BODY_BBOX_SUDDEN_FRAC
+        if not hasattr(self, "_body_bbox_streak"):
+            self._body_bbox_streak = {}
+        self._body_bbox_streak[tid] = (
+            self._body_bbox_streak.get(tid, 0) + 1 if trip else 0)
+        if not trip or self._body_bbox_streak[tid] < BODY_SUDDEN_STREAK:
             return False
         if not hasattr(self, "_body_kp_flag_ts"):
             self._body_kp_flag_ts = {}
         last_flag = self._body_kp_flag_ts.get(tid, 0.0)
         if now - last_flag < BODY_SUDDEN_COOLDOWN_S:
             return False
-        if hop_frac >= BODY_BBOX_SUDDEN_FRAC:
-            self._body_kp_flag_ts[tid] = now
-            return True
-        return False
+        self._body_kp_flag_ts[tid] = now
+        if not hasattr(self, "_body_flag_speed"):
+            self._body_flag_speed = {}
+        self._body_flag_speed[tid] = hop_frac
+        return True
 
     def _sudden_motion_check(self, tid: int, kps: list,
                               box: tuple, now: float) -> bool:
@@ -2728,13 +2753,22 @@ class LiveSession(threading.Thread):
         # Median of the ring EXCLUDING this newest hop is the baseline.
         baseline_sorted = sorted(ring[:-1])
         median = baseline_sorted[len(baseline_sorted) // 2] or 1e-6
+        trip = (mean_hop >= BODY_SUDDEN_FLOOR
+                and mean_hop >= BODY_SUDDEN_RATIO * median)
+        if not hasattr(self, "_body_kp_streak"):
+            self._body_kp_streak = {}
+        self._body_kp_streak[tid] = (
+            self._body_kp_streak.get(tid, 0) + 1 if trip else 0)
+        if not trip or self._body_kp_streak[tid] < BODY_SUDDEN_STREAK:
+            return False
         last_flag = self._body_kp_flag_ts.get(tid, 0.0)
         if now - last_flag < BODY_SUDDEN_COOLDOWN_S:
             return False
-        if mean_hop >= BODY_SUDDEN_FLOOR and mean_hop >= BODY_SUDDEN_RATIO * median:
-            self._body_kp_flag_ts[tid] = now
-            return True
-        return False
+        self._body_kp_flag_ts[tid] = now
+        if not hasattr(self, "_body_flag_speed"):
+            self._body_flag_speed = {}
+        self._body_flag_speed[tid] = mean_hop
+        return True
 
     def _publish(self, img) -> None:
         import cv2
@@ -2901,17 +2935,22 @@ class LiveSession(threading.Thread):
                         pass
             js_boxes.append(jb)
         # Fighting pass: any two person tracks that BOTH tripped the
-        # sudden-motion gate within the last FIGHT_COOLDOWN_S seconds AND
-        # are within BODY_FIGHT_MAX_DIST_PX pixels centroid-to-centroid.
-        # Upgrades their "sudden_motion" flag to "fighting" so the layer
-        # can distinguish a lone punch/kick from an actual altercation.
+        # sudden-motion gate within the same BODY_FIGHT_PAIR_WINDOW_S
+        # AND are within BODY_FIGHT_MAX_DIST_PX centroid-to-centroid,
+        # AND both flagged at genuinely high speed (>= the sudden
+        # floor) - near-simultaneous violent bursts from BOTH sides,
+        # not one runner passing a stander. Upgrades "sudden_motion"
+        # to "fighting" so the layer can tell a lone kick from an
+        # altercation.
         if layer == "body":
             try:
                 _fnow = time.time()
+                _speeds = getattr(self, "_body_flag_speed", {})
                 sudden_active = {
                     tid for tid, ts in
                     getattr(self, "_body_kp_flag_ts", {}).items()
-                    if _fnow - ts < BODY_FIGHT_COOLDOWN_S
+                    if _fnow - ts < BODY_FIGHT_PAIR_WINDOW_S
+                    and _speeds.get(tid, 0.0) >= BODY_SUDDEN_FLOOR
                 }
                 if len(sudden_active) >= 2:
                     person_jbs = [b for b in js_boxes

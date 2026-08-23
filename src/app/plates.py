@@ -114,12 +114,14 @@ OCR_PAD = "_"
 OCR_SLOTS = 9
 OCR_W, OCR_H = 128, 64
 # Acceptance gates: mean per-slot confidence and a minimum of 4 readable
-# characters (shorter "reads" on far crops are noise letters). 0.45 (was
-# 0.60): night footage never clears 0.60 on sub-60px plates, so the gate
-# rejected every read the operator could still eyeball-verify. The chip
-# SHOWS the confidence, so a 0.5 read is presented as what it is.
-OCR_MIN_CONF = 0.45
-OCR_MIN_CHARS = 4
+# characters (shorter "reads" on far crops are noise letters). 0.30 (was
+# 0.45, was 0.60): live YouTube feeds re-encode plates so aggressively
+# that Thai / small motorcycle plates rarely clear 0.45 even when the
+# operator can read them by eye. The chip SHOWS the confidence, so a
+# 0.35 read is presented as what it is. Env override:
+# PLATE_OCR_MIN_CONF=0.25 for even more permissive, 0.5 for stricter.
+OCR_MIN_CONF = float(os.environ.get("PLATE_OCR_MIN_CONF") or 0.30)
+OCR_MIN_CHARS = int(os.environ.get("PLATE_OCR_MIN_CHARS") or 4)
 # Vehicle box narrower than this (px) puts the plate under ~8 px of
 # height at 480p street distance. 2026-08-15: with FSRCNN 4x upscale
 # in the OCR pipeline the practical floor dropped - a 15-20 px plate on
