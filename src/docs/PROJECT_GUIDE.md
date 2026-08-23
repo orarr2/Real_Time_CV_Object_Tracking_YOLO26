@@ -6,8 +6,8 @@
 > anomaly_crops / calibrate_conf); plate detector upgraded to
 > yolov11-L + OCR to fast-plate-ocr `cct_s_v2` + pose to `yolov8s-pose`;
 > body-anomaly gates hardened (ratio 8, 10-sample/10-s bbox window,
-> 2-tick debounce, 60-px both-fast fighting rule); NEW Fall-detection
-> layer (11 layers now); per-country plate grammar; hot-trail decay +
+> 2-tick debounce, 60-px both-fast fighting rule); fall detection
+> folded into the Body layer; per-country plate grammar; hot-trail decay +
 > 15-s replay ring; PDT clock-sync probe implemented; per-layer drawers
 > split into `app/layers/draw.py`. Thresholds reference:
 > `src/docs/DECISION_THRESHOLDS_HE.md`.

@@ -11,7 +11,7 @@ app/dashboard_server.py - no cloud, no Firestore, no external SDK.
 
 Pick a camera in the header dropdown (or upload an MP4/MKV via the upload
 button), then click Start. The live tile renders full-width; click the
-advanced-analysis icon to pick one of the 11 layers.
+advanced-analysis icon to pick one of the 10 layers.
 """
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def main() -> None:
     print("Routes: /                     -> web/index.html (single-camera live dashboard)")
     print("        /api/upload-video     -> POST an MP4/MKV/MOV/AVI/WEBM to analyze")
     print("        /api/uploaded-videos  -> list your uploaded files")
-    print("        /api/analysis/*       -> start/stop/data for the 11-layer advanced analysis")
+    print("        /api/analysis/*       -> start/stop/data for the 10-layer advanced analysis")
     print("        /snapshots            -> local snapshots (saved detections, review crops)\n")
     print("Press Ctrl+C to stop.\n")
 

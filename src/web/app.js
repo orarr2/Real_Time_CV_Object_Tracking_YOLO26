@@ -672,7 +672,6 @@ const ANALYSIS_LAYER_DEFS = [
   ["pose",     "Pose & skeleton"],
   ["gestures", "Hand gestures"],
   ["body",     "Body anomalies"],
-  ["fall",     "Fall detection"],
   ["faces",    "Face detection"],
   ["line",     "Line crossing"],
   ["fire",     "Fire detection"],

@@ -6,8 +6,8 @@
 > anomaly_crops / calibrate_conf); plate detector upgraded to
 > yolov11-L + OCR to fast-plate-ocr `cct_s_v2` + pose to `yolov8s-pose`;
 > body-anomaly gates hardened (ratio 8, 10-sample/10-s bbox window,
-> 2-tick debounce, 60-px both-fast fighting rule); NEW Fall-detection
-> layer (11 layers now); per-country plate grammar; hot-trail decay +
+> 2-tick debounce, 60-px both-fast fighting rule); fall detection
+> folded into the Body layer; per-country plate grammar; hot-trail decay +
 > 15-s replay ring; PDT clock-sync probe implemented; per-layer drawers
 > split into `app/layers/draw.py`. Thresholds reference:
 > `src/docs/DECISION_THRESHOLDS_HE.md`.
@@ -15,7 +15,7 @@
 > **Roadmap status after the 2026-08-23 session:** items now DONE and
 > no longer open here: per-layer draw split (first slice of the
 > live_analysis refactor), hot-trail strip decay, replay ring
-> (15 s scoped variant), fall-detection layer, PDT clock-sync probe,
+> (15 s scoped variant), fall detection inside the Body layer, PDT clock-sync probe,
 > per-country plate grammar, model upgrades (pose-S / plate-L /
 > OCR cct_s_v2), body-anomaly hardening. Remaining items below are
 > unchanged planning text and may reference the pre-split layout.
@@ -142,7 +142,7 @@ with_reid: false          # flip to true after Q1+M1 (SOLIDER)
 **Delta** - Homegrown position tracker → industry standard. Track ID
 stability across occlusion improves markedly on crowded street scenes.
 
-**Effort** - ~4 h (swap + regression test the 11 layers). **Deps** -
+**Effort** - ~4 h (swap + regression test the 10 layers). **Deps** -
 none new (bundled with `ultralytics>=8.4`). **Status** - ⬜
 
 ---

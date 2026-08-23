@@ -6,8 +6,8 @@
 > anomaly_crops / calibrate_conf); plate detector upgraded to
 > yolov11-L + OCR to fast-plate-ocr `cct_s_v2` + pose to `yolov8s-pose`;
 > body-anomaly gates hardened (ratio 8, 10-sample/10-s bbox window,
-> 2-tick debounce, 60-px both-fast fighting rule); NEW Fall-detection
-> layer (11 layers now); per-country plate grammar; hot-trail decay +
+> 2-tick debounce, 60-px both-fast fighting rule); fall detection
+> folded into the Body layer; per-country plate grammar; hot-trail decay +
 > 15-s replay ring; PDT clock-sync probe implemented; per-layer drawers
 > split into `app/layers/draw.py`. Thresholds reference:
 > `src/docs/DECISION_THRESHOLDS_HE.md`.
@@ -15,7 +15,7 @@
 
 Single-camera live analysis dashboard for public street webcams. Pick one
 camera (Thailand catalog or an uploaded MP4/MKV), run YOLO26 detection plus
-one of 11 analysis layers on top of the live video.
+one of 10 analysis layers on top of the live video.
 
 - **Frontend:** static HTML/JS + Chart.js. HLS via `hls.js`, YouTube via
   iframe embed. Canvas overlay draws boxes on top of the live video with
@@ -154,14 +154,13 @@ stream (accumulators are preserved).
 | 1 | `paths`    | Per-track trail history plus a speed tier (slow / moving / fast).                |
 | 2 | `pose`     | COCO-17 top-down skeleton on each person crop tall enough for legible keypoints. |
 | 3 | `gestures` | Temporal arm gestures across recent frames (hand_raised, both_hands_up, wave).   |
-| 4 | `body`     | Kinematic + gesture flags per person track.                                      |
+| 4 | `body`     | Kinematic + gesture flags per person track, incl. posture-based fall suspects.   |
 | 5 | `faces`    | Face bounding boxes only (YuNet). No identification.                             |
 | 6 | `line`     | Counting line drawn by the operator; increments in / out counters.               |
 | 7 | `loiter`   | Dwell alerts on operator-drawn polygons.                                         |
 | 8 | `parking`  | Occupancy flips (empty <-> filled) on operator-drawn polygons.                   |
 | 9 | `plates`   | Two-stage LPR (yolov11-L plate detector + fast-plate-ocr) with per-track cache.  |
 | 10 | `heat`    | 48x27 grid activity heatmap with 180 s half-life decay.                          |
-| 11 | `fall`    | Posture-based fall suspect: torso lean / lying aspect after an upright history.  |
 
 ## Model files
 

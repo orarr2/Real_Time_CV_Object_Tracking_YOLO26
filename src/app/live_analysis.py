@@ -52,12 +52,11 @@ _SRC_ROOT = Path(__file__).resolve().parent.parent
 # load_fire_model below) and gracefully reports "model not loaded" when
 # the weights file is absent, so a running session is never killed by a
 # missing optional model.
-LIVE_LAYERS = ("paths", "pose", "gestures", "body", "fall", "faces",
-               "heat", "line", "fire", "parking", "plates")
+LIVE_LAYERS = ("paths", "pose", "gestures", "body", "faces", "heat",
+               "line", "fire", "parking", "plates")
 DEFAULT_LOITER_DWELL_S = 30.0
 _VEHICLE_CLASSES = ("car", "truck", "bus", "motorcycle", "bicycle")
 LAYER_TITLES = {
-    "fall":     "Fall detection",
     "paths":    "Paths & speeds",
     "pose":     "Pose & skeleton",
     "gestures": "Hand gestures",
@@ -298,7 +297,9 @@ BODY_SUDDEN_STREAK = 2
 # 90 -> 60 px kills hugs / handshakes / close conversation; the pair
 # window + per-side speed floor demand that BOTH parties were bursting
 # essentially simultaneously, not one runner passing a stander.
-# Fall detector (decision D4, 2026-08-23). Posture-first, because on
+# Fall detector (decision D4, 2026-08-23; folded INTO the Body layer
+# per operator direction - it is not a separate picker entry). Posture
+# first, because on
 # this host the tick rate is too sparse for velocity to be trustworthy
 # (the decision-6 lesson): a person is a FALL SUSPECT when their pose
 # torso (shoulder-center -> hip-center) leans more than FALL_ANGLE_DEG
@@ -1794,13 +1795,12 @@ class LiveSession(threading.Thread):
             sudden_tids = {tid for tid, ts in
                            getattr(self, "_body_kp_flag_ts", {}).items()
                            if time.time() - ts < BODY_SUDDEN_COOLDOWN_S}
+            # Fall suspects paint red through the same drawer - fall
+            # detection lives INSIDE the Body layer (operator direction).
+            sudden_tids |= {tid for tid, st in
+                            getattr(self, "_fall_state", {}).items()
+                            if time.time() - st[2] < FALL_COOLDOWN_S}
             return draw_body_layer(img, visible, stats_by_id, sudden_tids)
-        if layer == "fall":
-            # Same drawer as body: grey per-person boxes, red on flagged.
-            fall_tids = {tid for tid, st in
-                         getattr(self, "_fall_state", {}).items()
-                         if time.time() - st[2] < FALL_COOLDOWN_S}
-            return draw_body_layer(img, visible, stats_by_id, fall_tids)
         if layer == "faces":
             return draw_faces_layer_img(img, faces_list,
                                         available=bool(self._faces_ok))
@@ -2418,19 +2418,20 @@ class LiveSession(threading.Thread):
                     g = _static_postures(jb["kps"])
                     if g:
                         jb["gestures"] = g
-                if (layer == "fall" and tr.cls == "person"
+                if (layer == "body" and tr.cls == "person"
                         and tr.tid not in riders_pub):
                     try:
-                        _bbx = (jb["x1"], jb["y1"], jb["x2"], jb["y2"])
+                        # Fall check first (operator: fall detection is
+                        # PART of the Body layer, not its own entry) -
+                        # a confirmed fall outranks a sudden-motion tag.
+                        _bbx0 = (jb["x1"], jb["y1"], jb["x2"], jb["y2"])
                         if self._fall_check(tr.tid, jb.get("kps"),
-                                            _bbx, time.time()):
+                                            _bbx0, time.time()):
                             jb["flag"] = "fall_suspect"
                             jb["alert"] = True
                             jb["flags"] = ["fall posture confirmed"]
                     except Exception:
                         pass
-                if (layer == "body" and tr.cls == "person"
-                        and tr.tid not in riders_pub):
                     try:
                         # Sudden-motion gate. Two paths:
                         # (1) with pose keypoints -> per-track ring of
@@ -2597,7 +2598,7 @@ class LiveSession(threading.Thread):
         # Operating-envelope note per pose-family layer: how many people
         # were in scene vs how many passed the size gates, so an empty
         # overlay reads as an honest "out of range", not a failure.
-        if layer in ("pose", "gestures", "body", "fall", "faces"):
+        if layer in ("pose", "gestures", "body", "faces"):
             persons = [b for b in js_boxes if b["cls"] == "person"]
             with_kps = [b for b in persons if b.get("kps")]
             if layer == "faces":
