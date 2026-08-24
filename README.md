@@ -1,10 +1,11 @@
 # Real-Time CV Object Tracking - YOLO26
 
 > **Changes in the 2026-08-23 session** (full decision log in
-> `AUDIT_2026-08-23.md`): ~1,900 lines of dead code removed (dead server
+> `docs/AUDIT_2026-08-23.md`): ~1,900 lines of dead code removed (dead server
 > endpoints, burst-analytics chain, blur path, live_samples /
 > anomaly_crops / calibrate_conf); plate detector upgraded to
-> yolov11-L + OCR to fast-plate-ocr `cct_s_v2` + pose to `yolov8s-pose`;
+> yolov11-S + OCR to fast-plate-ocr `cct_s_v2` + pose to `yolov8s-pose`
+> (the L plate variant was trialed and reverted: 36 s ticks on this CPU);
 > body-anomaly gates hardened (ratio 8, 10-sample/10-s bbox window,
 > 2-tick debounce, 60-px both-fast fighting rule); fall detection
 > folded into the Body layer; per-country plate grammar; hot-trail decay +
@@ -28,31 +29,57 @@ one of 10 analysis layers on top of the live video.
 
 ## Layer gallery
 
-Four representative backend-rendered frames, captured live on the Soi
-Green Mango (Chaweng, Koh Samui) YouTube webcam. Each frame is what the
-backend actually draws before the JPEG leaves the process; the
-dashboard's canvas overlay draws the same boxes on top of the live video
-for smoothness between backend ticks.
+Representative backend-rendered frames, captured live on the Soi Green
+Mango (Chaweng, Koh Samui) YouTube webcam during the full 10-layer
+verification runs of 2026-08-23/24. Each frame is what the backend
+actually draws before the JPEG leaves the process; the dashboard's
+canvas overlay draws the same boxes on top of the live video for
+smoothness between backend ticks.
+
+![License plate reads](docs/proof/plates_reads.jpg)
+
+*License plates (two-stage LPR) - 4 plates read on one frame: green
+boxes carry the OCR text + confidence (Thai plates read via the
+multi-script OCR chain), orange boxes are vehicles in range that gave
+no confident read - shown honestly as "no-read".*
+
+![Line crossing](docs/proof/line_crossing.jpg)
+
+*Line crossing - operator-drawn tripwire with a direction arrow; the
+In/Out counters accumulate on foot-of-box side flips (37 in / 44 out
+at this point of the session).*
+
+![Heat overlay](docs/proof/heat_overlay.jpg)
+
+*Heat signature - 48x27 activity grid accumulated for 104 minutes with
+a 180 s half-life; hot blobs sit exactly on the parked-scooter rows and
+the walking lane.*
+
+![Face detection](docs/proof/faces_detect.jpg)
+
+*Faces - YuNet with a second-pass 1.5x upscale rescue for far faces;
+4 faces boxed on this frame, including a helmeted rider.*
+
+![Parking occupancy](docs/proof/parking_spots.jpg)
+
+*Parking - 7 auto-detected spots with live occupancy state (2/7
+occupied here); a spot flipping free/occupied emits an event.*
+
+![Paths and speeds](docs/proof/paths_tracks.jpg)
+
+*Paths & speeds - per-track IDs, trail history and a speed tier per
+moving object; 8 tracked on this frame.*
 
 ![Body anomaly alert](docs/proof/body_anomaly_alert.jpg)
 
 *Body anomalies - kinematic verdicts per person track; the red ALERT
-banner + red halo mark a live "sudden motion" event on person #268.*
+banner + red halo mark a live "sudden motion" event on person #268.
+Posture-based fall suspects run inside this same layer.*
 
 ![Pose skeletons](docs/proof/pose_skeletons.jpg)
 
 *Pose & skeleton - COCO-17 top-down keypoints drawn on every person crop
 tall enough for legible joints (6 of 10 people in view on this frame).*
-
-![Line crossing](docs/proof/line_crossing.jpg)
-
-*Line crossing - operator-drawn tripwire with In/Out counters that
-increment on foot-of-box side flips; 2 in, 4 out this window.*
-
-![Loitering scene](docs/proof/loitering_scene.jpg)
-
-*Zone & loitering - per-person confidence over the live stream, ready
-for operator-drawn dwell polygons.*
 
 ## Table of contents
 
@@ -159,7 +186,7 @@ stream (accumulators are preserved).
 | 6 | `line`     | Counting line drawn by the operator; increments in / out counters.               |
 | 7 | `loiter`   | Dwell alerts on operator-drawn polygons.                                         |
 | 8 | `parking`  | Occupancy flips (empty <-> filled) on operator-drawn polygons.                   |
-| 9 | `plates`   | Two-stage LPR (yolov11-L plate detector + fast-plate-ocr) with per-track cache.  |
+| 9 | `plates`   | Two-stage LPR (yolov11-S plate detector + fast-plate-ocr) with per-track cache.  |
 | 10 | `heat`    | 48x27 grid activity heatmap with 180 s half-life decay.                          |
 
 ## Model files
@@ -168,7 +195,7 @@ stream (accumulators are preserved).
 | -------------------------------------------- | ------------------------------------------------------------------------ | --------------- |
 | `yolo26m.pt`                                 | Primary detector (person + vehicles + train).                            | Auto-downloaded on first `YOLO("yolo26m.pt")` call by `ultralytics`. |
 | `src/yolo26m_openvino_model/`                | OpenVINO IR cache for `yolo26m.pt` (2-3x faster on CPU).                 | Built locally with `YOLO("yolo26m.pt").export(format="openvino")`. |
-| `yolov11l-plate.pt`                          | LPR stage 1: locate plate boxes inside a vehicle crop (Large finetune).  | [morsetechlab/yolov11-license-plate-detection](https://huggingface.co/morsetechlab/yolov11-license-plate-detection) (`license-plate-finetune-v1l.pt`). |
+| `yolov11s-plate.pt`                          | LPR stage 1: locate plate boxes inside a vehicle crop (Small finetune).  | [morsetechlab/yolov11-license-plate-detection](https://huggingface.co/morsetechlab/yolov11-license-plate-detection) (`license-plate-finetune-v1s.pt`). |
 | `plate_ocr_global.onnx`                      | LPR stage 2: Latin OCR (digits + A-Z, 10 slots + region head).           | [fast-plate-ocr `cct_s_v2_global`](https://github.com/ankandrew/fast-plate-ocr) (MIT). |
 | `yolov8s-pose.pt`                            | Top-down COCO-17 keypoints on person crops (Small).                      | Auto-downloaded on first `YOLO("yolov8s-pose.pt")` call by `ultralytics`. |
 | `models/FSRCNN_x4.pb`                        | 4x super-resolution applied to small plate / vehicle crops before OCR.   | [Saafke/FSRCNN Tensorflow](https://github.com/Saafke/FSRCNN_Tensorflow) - grab `FSRCNN_x4.pb` (Apache-2.0). |
@@ -237,7 +264,7 @@ client-side interpolation and velocity extrapolation.
 real-time-cv-yolo26/
   README.md                         (this file)
   yolo26m.pt                        primary detector
-  yolov11l-plate.pt
+  yolov11s-plate.pt
   yolov8s-pose.pt
   plate_ocr_global.onnx             Latin plate OCR
   models/
@@ -265,7 +292,6 @@ real-time-cv-yolo26/
       index.html, app.js
       snapshots/                    saved detections + review crops
     tests/                          pytest suite
-    tools/                          (empty - calibration CLI retired)
     docs/
       PROJECT_GUIDE.md              deep-dive (English)
       PROJECT_GUIDE_HE.md           deep-dive (Hebrew)

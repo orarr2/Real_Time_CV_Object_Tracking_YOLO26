@@ -1,10 +1,10 @@
 # Real-Time CV YOLO26 - Technical Roadmap
 
 > **Changes in the 2026-08-23 session** (full decision log in
-> `AUDIT_2026-08-23.md`): ~1,900 lines of dead code removed (dead server
+> `docs/AUDIT_2026-08-23.md`): ~1,900 lines of dead code removed (dead server
 > endpoints, burst-analytics chain, blur path, live_samples /
 > anomaly_crops / calibrate_conf); plate detector upgraded to
-> yolov11-L + OCR to fast-plate-ocr `cct_s_v2` + pose to `yolov8s-pose`;
+> yolov11-S + OCR to fast-plate-ocr `cct_s_v2` + pose to `yolov8s-pose`;
 > body-anomaly gates hardened (ratio 8, 10-sample/10-s bbox window,
 > 2-tick debounce, 60-px both-fast fighting rule); fall detection
 > folded into the Body layer; per-country plate grammar; hot-trail decay +
@@ -16,10 +16,187 @@
 > no longer open here: per-layer draw split (first slice of the
 > live_analysis refactor), hot-trail strip decay, replay ring
 > (15 s scoped variant), fall detection inside the Body layer, PDT clock-sync probe,
-> per-country plate grammar, model upgrades (pose-S / plate-L /
+> per-country plate grammar, model upgrades (pose-S / plate-S /
 > OCR cct_s_v2), body-anomaly hardening. Remaining items below are
 > unchanged planning text and may reference the pre-split layout.
 
+
+<div dir="rtl">
+
+## מחקר ערוצים 2026-08-24 - מנגנוני מעקב בזמן אמת, ויזואליזציות וטכניקות לאימוץ
+
+סריקה ממוקדת של חמשת היוצרים: Mohsin Ali, OpenViewer, AI Dev Guy,
+Laskenta, Pyresearch. הערה מרכזית: ארבעה מהחמישה הם קודם כל דפי
+פייסבוק של יוצרי דמו בתחום ה-CV; "LASKENTAM PYRESEARCH" הם שני גורמים
+נפרדים - Laskenta (השם המלא: Laskenta Technologies Limited) ו-Pyresearch.
+כל מה שמסומן "נבדק ברמת קוד" נקרא ישירות מקבצי המקור בריפואים שלהם.
+
+### 1. Mohsin Ali
+
+מי הם: דף פייסבוק facebook.com/mohcinale (26K עוקבים, Visual Editor);
+ערוץ יוטיוב חדש youtube.com/@MohsinAliArf (רובוטיקה, AMR, Physical AI).
+אין GitHub ואין קוד פתוח.
+
+מה נמצא בפועל:
+
+- סרטון הערכת מהירות רכבים (תוויות קמ"ש על מכוניות). בתגובות נמצאה
+  ביקורת מקצועית מדויקת: המהירות המוצגת יורדת כשהרכב מתרחק כי החישוב
+  מבוסס פיקסלים בלבד, בלי כיול פרספקטיבה.
+- סדרת רילסים של זיהוי ציוד מגן (PPE, OSHA): קסדות, אפודים, בדיקת
+  תאימות עובדים.
+- ביוטיוב: דמו MediaPipe - זיהוי Pose ב-6 דרגות חופש, זיהוי Gestures
+  של יד ו-Landmark Detection בהקשר רובוטיקה.
+
+מה שווה לאמץ: לא להציג קמ"ש בלי Perspective Transform (הומוגרפיה עם
+מרחקי ייחוס אמיתיים על הכביש) - זה ההבדל בין דמו לכלי אמין.
+
+### 2. OpenViewer
+
+מי הם: דף פייסבוק "OpenViewer" (7.9K עוקבים); אתר מוצר aiopenviewer.com
+("Remote Access and AI Security Camera"). לא נמצא ריפו ציבורי למרות
+שהמוצר מוצג כקוד פתוח; חשבונות היוטיוב בשם דומה ריקים.
+
+מה נמצא בפועל:
+
+- פייפליין מוצהר: Detection ואז Classification ואז Rule ואז Alert -
+  מנוע חוקים מעל הזיהויים, עם התראות Push ברמת מערכת ההפעלה.
+- זיהוי אנשים, אש ורכבים + מודלים מותאמים; עבודה עם Webcam ומצלמות IP;
+  חיבור P2P מוצפן (DTLS) בלי שרת מתווך; דשבורד Control Center.
+- רילס Vehicle Access Control עם ALPR: שער חניה שנפתח לפי לוחית.
+- רילס ANPR עם רכב ברשימה שחורה: תיבת "BLACKLIST VEHICLE" + מיפוי
+  מסלול הנסיעה על מפת לוויין. בקוד המוצג ברילס: "SEARCH PLATE
+  PIPELINE" עם ultralytics YOLO ואימות קודי מחוז וייטנאמיים ללוחיות.
+- עוד רילסים: מעקב מרחפן, זיהוי נפילה/שבץ, זיהוי בכי תינוק, בקרת
+  איכות על פס נע.
+
+מה שווה לאמץ: מנוע חוקים מעל הזיהויים במקום התראות מקודדות קשיח;
+רשימת מעקב (watchlist) ללוחיות עם התראה והצגת מסלול הרכב - אצלנו זה
+מתורגם ל-trajectory history לכל track_id.
+
+### 3. AI Dev Guy
+
+מי הם: דף פייסבוק "AI Dev Guy" (13K עוקבים), מאחוריו המפתח Nawaf
+Rayhan; GitHub: github.com/Nawaf-Rayhan585 (ריפואים מרכזיים:
+LPR-Vehicle-License-Detection ו-YOLO_Projects); אתר nawaf585.netlify.app.
+יוטיוב ואינסטגרם קיימים אך ריקים - הפעילות האמיתית בפייסבוק וב-GitHub.
+
+מה נמצא בפועל (נבדק ברמת קוד):
+
+- people_footfall_count.py: ספירת נכנסים/יוצאים - YOLOv8n מסונן
+  למחלקת person + ByteTrack דרך ספריית supervision, קו ייחוס אופקי,
+  זיהוי כיוון חצייה לפי השוואת ה-y הקודם מול הקו (זיכרון מיקום לכל ID),
+  וקנבס דשבורד 1000x800 שמצויר סביב הווידאו: כותרת, פיד מוקטן, פאנל
+  IN ירוק ופאנל OUT כחול.
+- Heatmap_People_Crowd.py: מפת חום של קהל - צבירה מתמשכת של עיגול
+  ברדיוס 30 סביב כל centroid, ואז GaussianBlur, נרמול, COLORMAP_JET
+  ומיזוג addWeighted של 70/30 עם הפריים + מונה אנשים חי.
+- LPR-Vehicle-License-Detection: YOLOv8n לרכבים + EasyOCR,
+  דה-דופליקציה עם set של לוחיות שכבר נראו, סינון ביטחון מתחת 0.6
+  וטקסטים קצרים מ-4 תווים, אפליקציית Streamlit עם טבלת תוצאות
+  (לוחית, ביטחון, סוג רכב, פריים, timestamp), הורדת דוח JSON והורדת
+  וידאו מעובד.
+- YoloV8_cars_detection.py: ספירה לפי מחלקה, תצוגת FPS חיה, רישום כל
+  זיהוי ל-detections.csv (פריים, מחלקה, ביטחון) + MP4 מסומן.
+- עוד בריפו: Suspicious_Behaviour.py (תנוחות חשודות מבוסס Pose),
+  Fire_Detection.ipynb, ו-Reels_detector_yolov26.py.
+
+מה שווה לאמץ: דפוס ספירת החצייה (prev_y מול קו + ByteTrack); קנבס
+דשבורד מצויר סביב הווידאו; לוג CSV של כל זיהוי כתשתית אודיט.
+
+### 4. Laskenta (מה שנכתב "LASKENTAM")
+
+מי הם: דף פייסבוק facebook.com/laskentatechltd - "Laskenta" (79K
+עוקבים), חברת תוכנה/AI מניגריה (Laskenta Technologies Limited); אתר
+laskentatech.pro. אין GitHub ואין קוד ציבורי - רילסים של קונספט/מוצר.
+
+מה נמצא בפועל:
+
+- חתימה ויזואלית קבועה: פאנל צד בשם "REALTIME OVERLAY HUD" לכל דומיין.
+- HOME SECURITY HUD (220K צפיות): מעקב אנשים בין חדרים עם סיווג לכל
+  זיהוי - דייר מוכר / אדם לא מוכר / נוכחות כללית / חדר ריק עם תנועה,
+  עם אחוז ביטחון, טיימר משך שהייה ושם האזור (Living Room, Front Door).
+  היכולות המוצהרות: motion detection כאות ראשון, re-identification מול
+  פרופילי דיירים, ו-zone mapping לאזורים בעלי שם.
+- CHECKOUT ANALYTICS HUD: כרטיס פר מוצר עם ID, ביטחון, מותג ומחיר +
+  קו מוביל (leader line) מהמוצר לכרטיס + פאנל ברקוד.
+- VEHICLE DIAGNOSTICS HUD: תוויות סטטוס פר רכיב מנוע.
+- אזהרת אמינות: אלה רילסים מסוגננים להצגת קונספט, אין הוכחה שהכל רץ
+  בקוד אמיתי. הערך הוא בשפה הוויזואלית, לא במימוש.
+
+מה שווה לאמץ: כרטיסי צד פר אובייקט (ID, סטטוס, ביטחון, זמן שהייה,
+שם אזור) עם קווים מובילים במקום לערום טקסט על התיבות; אזורים בעלי שם
+עם occupancy ו-dwell פר אזור ("מעבר חצייה", "תחנת אוטובוס", "חזית חנות").
+
+### 5. Pyresearch
+
+מי הם: הגורם הוותיק והעשיר מכולם - youtube.com/c/Pyresearch,
+github.com/pyresearch (73 ריפואים), pyresearch.org, medium.com/@Pyresearch,
+ודף פייסבוק (61K עוקבים).
+
+מה נמצא בפועל (נבדק ברמת קוד):
+
+- ריפו Real-time-Retail-Heatmap-Tracking-with-YOLO26-and-Flask:
+  Ultralytics solutions.Heatmap עם tracker בתצורת botsort.yaml,
+  COLORMAP_JET, ו-Flask עם שלושה נתיבים - דף index, סטרים MJPEG
+  ב-/video_feed, ו-/stats שמחזיר JSON (customers, total_today,
+  peak_count, avg_dwell) שהדשבורד מושך בנפרד. הערת יושרה: בקוד הדמו
+  peak_count ו-avg_dwell סטטיים/אקראיים - הדפוס טוב, המספרים מזויפים.
+- ריפו Cashierless-Checkout (YOLO26): model.track עם persist=True
+  ו-botsort.yaml בביטחון 0.5, עגלה כ-dict לפי track_id (חיוב פעם אחת
+  בהופעה ראשונה של ID), תווית "מחלקה $מחיר (ID) ביטחון" וסכום רץ.
+- ריפו Number-plate-Detection-YOLOv12: ANPR עם OCR לאכיפת חניה.
+- עוד ריפואים רלוונטיים: End-to-End-Fight-Detection (YOLOv26 + Flask),
+  Shoplifting-Detection, הערכת מרחק ממצלמה בודדת עם YOLO11, זיהוי אש
+  ועשן, ניטור עובדים וזיהוי שינה, וכתבת People Counter ב-Medium.
+
+מה שווה לאמץ: הפרדת MJPEG מ-endpoint מדדים ב-JSON (זהה מבנית לדשבורד
+שלנו); דפוס "ספירה חד פעמית לפי track_id"; Ultralytics solutions
+(Heatmap, ObjectCounter) עם botsort.yaml להפחתת קוד ידני.
+
+### סיכום: הטכניקות המומלצות לאימוץ (עם ייחוס)
+
+1. מונה חציית קו דו-כיווני עם ByteTrack - זיכרון y קודם פר ID מול קו
+   ייחוס (AI Dev Guy: people_footfall_count.py; Pyresearch: People
+   Counter).
+2. ספירה חד פעמית לפי track_id - רישום ID בהופעה ראשונה בלבד למניעת
+   כפילויות בספירות והתראות (Pyresearch: Cashierless Checkout).
+3. מפת חום נצברת של תנועת אנשים - עיגול פר centroid + GaussianBlur +
+   COLORMAP_JET + מיזוג 70/30, עם דעיכה לתצוגת "N הדקות האחרונות"
+   (AI Dev Guy: Heatmap_People_Crowd.py; Pyresearch: solutions.Heatmap
+   עם BoT-SORT).
+4. הפרדת דשבורד: MJPEG לווידאו + JSON /stats למדדים (Pyresearch:
+   ריפו ה-Retail Heatmap עם Flask).
+5. שרשרת ANPR עם היגיינת תוצאות - סינון ביטחון מינימלי, פסילת טקסטים
+   קצרים, set של לוחיות שנראו, טבלת ראיות עם פריים ו-timestamp וייצוא
+   JSON (AI Dev Guy: ריפו ה-LPR; Pyresearch: ריפו לוחיות YOLOv12;
+   OpenViewer: דמו ALPR).
+6. Watchlist ללוחיות + מסלול נסיעה - התאמה לרשימה שחורה, התראה, וציור
+   מסלול הרכב (OpenViewer: רילס ה-Route Mapping).
+7. מנוע חוקים מעל הזיהויים - Detection ואז Classification ואז Rule
+   ואז Alert עם התראות Push (OpenViewer: aiopenviewer.com).
+8. אזורים בעלי שם עם occupancy ו-dwell - מיפוי אזורי הפריים לשמות,
+   ספירת נוכחות וטיימר שהייה פר אזור (Laskenta: HOME SECURITY HUD;
+   Pyresearch: מדד avg_dwell).
+9. כרטיסי HUD צדדיים עם קווים מובילים - פאנל צד עם כרטיס פר אובייקט
+   (ID, סטטוס, ביטחון, זמן, אזור) במקום טקסט צפוף על התיבות (Laskenta:
+   סדרת ה-HUD).
+10. דשבורד מצויר סביב הפריים - קנבס עם כותרת ופאנלי IN/OUT צבעוניים
+    כחלק מפריים הפלט (AI Dev Guy: people_footfall_count.py).
+11. מהירות רק עם כיול פרספקטיבה - Perspective Transform עם מרחקי
+    ייחוס אמיתיים לפני הצגת קמ"ש (הלקח מסרטון המהירות של Mohsin Ali
+    והביקורת בתגובות).
+12. לוג CSV פר זיהוי + FPS חי - רישום פריים, מחלקה וביטחון לכל זיהוי
+    כתשתית לאודיט (AI Dev Guy: YoloV8_cars_detection.py).
+13. שכבת התנהגות מבוססת Pose - שלד תנוחה + חוקים לזיהוי נפילה/קטטה
+    (AI Dev Guy: Suspicious_Behaviour.py; Pyresearch: Fight-Detection;
+    Mohsin Ali: דמו MediaPipe). בפרויקט זה כבר ממומש בשכבת Body -
+    נשאר רלוונטי להרחבה.
+
+הערות אמינות: OpenViewer ו-AI Dev Guy מחזיקים חשבונות יוטיוב ריקים -
+הפעילות האמיתית שלהם בפייסבוק וב-GitHub; הרילסים של Laskenta הם הדגמות
+קונספט ללא קוד ציבורי, ולכן משם נלקחת רק שפת הוויזואליזציה.
+
+</div>
 
 Source: multi-agent CV/YOLO research pass (2026-08-17). Eight parallel
 research strands scanned leading channels (OpenViewer, AI Dev Guy, Mohsin
