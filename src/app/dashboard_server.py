@@ -43,6 +43,7 @@ SNAPSHOTS_DIR = WEB_DIR / "snapshots"
 # a dedicated /plate-crops/<cam>/<file> path so B/C/D panels show real
 # per-stage crops instead of CSS crops of the same saved JPEG.
 PLATE_CROPS_DIR = ROOT / "data" / "plate_crops"
+FACE_CROPS_DIR = ROOT / "data" / "face_crops"
 
 _TVKUR_HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; turkey-footfall-dashboard)",
@@ -163,7 +164,14 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if self.path.startswith("/plate-crops/"):
             self._serve_plate_crop()
             return
+        # 2026-08-24: face-crop audit trail, same layout as plate crops.
+        if self.path.startswith("/face-crops/"):
+            self._serve_face_crop()
+            return
         path = self.path.split("?")[0]
+        if path == "/api/analysis/face-crops":
+            self._analysis_face_crops()
+            return
         if path == "/api/catalog":
             self._catalog()
             return
@@ -197,9 +205,6 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         if path == "/api/analysis/saved":
             self._analysis_saved()
-            return
-        if path == "/api/model-metrics":
-            self._model_metrics()
             return
         if path == "/api/lines":
             self._get_line()
@@ -904,6 +909,81 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         self._send_json(200, {"ok": True, "cam": cam,
                               "count": len(items), "items": items})
 
+    def _analysis_face_crops(self) -> None:
+        """GET /api/analysis/face-crops?cam=X[&limit=N] - newest saved
+        face crops for a camera (same audit-trail idea as plate-crops;
+        filenames are <ts_ms>_<n>_<conf_pct>.jpg, operator 2026-08-24).
+        """
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        cam = (q.get("cam") or [""])[0].strip()
+        limit = 12
+        try:
+            limit = max(1, min(40, int((q.get("limit") or ["12"])[0])))
+        except ValueError:
+            pass
+        if not cam:
+            self._send_json(400, {"error": "cam required"})
+            return
+        import re as _re
+        _safe = _re.compile(r"[^A-Za-z0-9._-]+")
+        safe_cam = _safe.sub("_", cam) or "cam"
+        cam_dir = FACE_CROPS_DIR / safe_cam
+        try:
+            files = sorted(cam_dir.glob("*.jpg"),
+                           key=lambda p: p.stat().st_mtime,
+                           reverse=True)
+        except OSError:
+            files = []
+        fn_re = _re.compile(r"^(\d+)_(\d+)_(\d{2})\.jpg$")
+        items = []
+        for p in files:
+            m = fn_re.match(p.name)
+            if not m:
+                continue
+            ts_ms, n, conf_pct = m.groups()
+            items.append({
+                "url": f"/face-crops/{safe_cam}/{p.name}",
+                "ts": int(ts_ms) / 1000.0,
+                "n": int(n),
+                "conf_pct": int(conf_pct),
+            })
+            if len(items) >= limit:
+                break
+        self._send_json(200, {"ok": True, "cam": cam,
+                              "count": len(items), "items": items})
+
+    def _serve_face_crop(self) -> None:
+        """GET /face-crops/<cam>/<file>.jpg -> serve from
+        src/data/face_crops/<cam>/<file>. Read-only, jpg-only."""
+        from urllib.parse import unquote
+        raw = self.path.split("?")[0]
+        rel = unquote(raw[len("/face-crops/"):])
+        parts = rel.split("/")
+        if (len(parts) != 2 or ".." in parts
+                or not parts[0] or not parts[1]
+                or not parts[1].endswith(".jpg")):
+            self.send_error(400, "bad face crop path")
+            return
+        import re as _re
+        _safe = _re.compile(r"[^A-Za-z0-9._-]+")
+        cam, fname = parts
+        if _safe.sub("", cam) != cam or _safe.sub("", fname) != fname:
+            self.send_error(400, "bad face crop path")
+            return
+        p = FACE_CROPS_DIR / cam / fname
+        try:
+            body = p.read_bytes()
+        except OSError:
+            self.send_error(404, "face crop not found")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=60")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _serve_plate_crop(self) -> None:
         """GET /plate-crops/<cam>/<file>.jpg -> serve from
         src/data/plate_crops/<cam>/<file>. Read-only, jpg-only."""
@@ -1122,19 +1202,6 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
 
 
-
-    def _model_metrics(self) -> None:
-        """Scoreboard endpoint driving the header line. Cheap - it just
-        walks the in-memory review store and does arithmetic. Safe to poll
-        every 10s from the browser. Since Category B (Review system) was
-        removed, this returns an empty scoreboard - the UI treats missing
-        counts as zero."""
-        self._send_json(200, {
-            "reviews": 0, "correct": 0, "wrong": 0, "unsure": 0,
-            "header_line": "reviews: 0",
-            "curve": [],
-            "note": "review system removed with Category B",
-        })
 
     def do_HEAD(self) -> None:
         # Browsers use GET (not HEAD) for <video>/HLS, so this matters only to

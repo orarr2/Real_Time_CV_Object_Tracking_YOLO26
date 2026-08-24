@@ -66,52 +66,53 @@ L_HIP, R_HIP = 11, 12
 L_KNEE, R_KNEE = 13, 14
 L_ANKLE, R_ANKLE = 15, 16
 
-# Bones + keypoints, grouped so a person carries four clearly separated
-# colors at once (2026-08-16): head/face cluster yellow (nose-eyes-ears),
-# arms cyan (shoulders-elbows-wrists), torso trunk green (shoulder-hip
-# rectangle), legs magenta (hips-knees-ankles). Colors are BGR (cv2
-# convention). Head cluster includes the intra-face edges (nose-eyes,
-# eyes-ears) so a well-lit face draws a small polygon rather than one
-# green stem down to the shoulders.
+# Bones + keypoints grouped in SIX regions with left/right separation
+# (operator pick 2026-08-24 after three side-by-side previews on live
+# frames: "v1, no legend"). Golden head, violet torso, green right arm
+# vs azure left arm, orange-red right leg vs cyan left leg. Colors are
+# BGR (cv2 convention). Head cluster keeps the intra-face edges
+# (nose-eyes, eyes-ears) so a well-lit face draws a small polygon
+# rather than one stem down to the shoulders.
 L_EYE, R_EYE = 1, 2
 L_EAR, R_EAR = 3, 4
 _HEAD_KPS = (NOSE, L_EYE, R_EYE, L_EAR, R_EAR)
-_ARM_KPS = (L_SHOULDER, R_SHOULDER, L_ELBOW, R_ELBOW, L_WRIST, R_WRIST)
-_TORSO_KPS: tuple = ()   # torso shares its keypoints with arms/legs anchors
-_LEG_KPS = (L_HIP, R_HIP, L_KNEE, R_KNEE, L_ANKLE, R_ANKLE)
+_TORSO_KPS = (L_SHOULDER, R_SHOULDER, L_HIP, R_HIP)
 
-_YELLOW = (0, 255, 255)
-_CYAN = (255, 255, 0)
-_GREEN = (0, 255, 0)
-_MAGENTA = (255, 0, 255)
+_C_HEAD = (0, 215, 255)     # golden yellow
+_C_TORSO = (230, 66, 168)   # violet
+_C_ARM_R = (80, 220, 80)    # green
+_C_ARM_L = (255, 170, 0)    # azure blue
+_C_LEG_R = (60, 100, 255)   # orange-red
+_C_LEG_L = (255, 255, 0)    # cyan
 
 _BONE_GROUPS = (
-    # Head/face cluster (yellow): nose-eyes-ears geometry.
+    # Head/face cluster: nose-eyes-ears geometry.
     (((NOSE, L_EYE), (NOSE, R_EYE), (L_EYE, L_EAR), (R_EYE, R_EAR)),
-     _YELLOW),
-    # Arms (cyan): shoulder-elbow-wrist chains, both sides.
-    (((L_SHOULDER, L_ELBOW), (L_ELBOW, L_WRIST),
-      (R_SHOULDER, R_ELBOW), (R_ELBOW, R_WRIST)),
-     _CYAN),
-    # Torso trunk (green): shoulder-shoulder, shoulder-hip, hip-hip.
-    # The neck bones (nose->shoulders) also live here so the head cluster
-    # stays isolated to the face rather than dangling down the chest.
+     _C_HEAD),
+    # Torso trunk: shoulder-shoulder, shoulder-hip, hip-hip. The neck
+    # bones (nose->shoulders) live here so the head cluster stays
+    # isolated to the face rather than dangling down the chest.
     (((NOSE, L_SHOULDER), (NOSE, R_SHOULDER),
       (L_SHOULDER, R_SHOULDER), (L_SHOULDER, L_HIP),
       (R_SHOULDER, R_HIP), (L_HIP, R_HIP)),
-     _GREEN),
-    # Legs (magenta): hip-knee-ankle chains, both sides.
-    (((L_HIP, L_KNEE), (L_KNEE, L_ANKLE),
-      (R_HIP, R_KNEE), (R_KNEE, R_ANKLE)),
-     _MAGENTA),
+     _C_TORSO),
+    # Arms split by side so crossed/overlapping people stay readable.
+    (((R_SHOULDER, R_ELBOW), (R_ELBOW, R_WRIST)), _C_ARM_R),
+    (((L_SHOULDER, L_ELBOW), (L_ELBOW, L_WRIST)), _C_ARM_L),
+    # Legs split by side for the same reason.
+    (((R_HIP, R_KNEE), (R_KNEE, R_ANKLE)), _C_LEG_R),
+    (((L_HIP, L_KNEE), (L_KNEE, L_ANKLE)), _C_LEG_L),
 )
 SKELETON = tuple(edge for edges, _color in _BONE_GROUPS for edge in edges)
 
-# Per-keypoint color map (index -> BGR) so keypoint dots also inherit the
-# region color instead of one flat white.
-_KP_COLORS: dict = {i: _YELLOW for i in _HEAD_KPS}
-_KP_COLORS.update({i: _CYAN for i in _ARM_KPS})
-_KP_COLORS.update({i: _MAGENTA for i in _LEG_KPS})
+# Per-keypoint color map (index -> BGR): joint dots inherit their limb's
+# color; shoulder/hip anchors take the torso color.
+_KP_COLORS: dict = {i: _C_HEAD for i in _HEAD_KPS}
+_KP_COLORS.update({i: _C_TORSO for i in _TORSO_KPS})
+_KP_COLORS.update({L_ELBOW: _C_ARM_L, L_WRIST: _C_ARM_L,
+                   R_ELBOW: _C_ARM_R, R_WRIST: _C_ARM_R,
+                   L_KNEE: _C_LEG_L, L_ANKLE: _C_LEG_L,
+                   R_KNEE: _C_LEG_R, R_ANKLE: _C_LEG_R})
 
 _model = None
 # Lazy-load guard: two live sessions hitting the first pose tick at the
@@ -227,6 +228,16 @@ def draw_skeleton(img, boxes: list[dict], min_conf: float = KP_MIN_CONF):
         kps = b.get("kps")
         if not kps:
             continue
+        # Dark halo pass first so limbs stay readable on any background
+        # (neon signs, white walls, headlights) - then the color pass.
+        for edges, _color in _BONE_GROUPS:
+            for i, j in edges:
+                xi, yi, ci = kps[i]
+                xj, yj, cj = kps[j]
+                if ci < min_conf or cj < min_conf:
+                    continue
+                cv2.line(img, (int(xi), int(yi)), (int(xj), int(yj)),
+                         (20, 20, 20), 5, cv2.LINE_AA)
         for edges, color in _BONE_GROUPS:
             for i, j in edges:
                 xi, yi, ci = kps[i]
@@ -234,13 +245,66 @@ def draw_skeleton(img, boxes: list[dict], min_conf: float = KP_MIN_CONF):
                 if ci < min_conf or cj < min_conf:
                     continue
                 cv2.line(img, (int(xi), int(yi)), (int(xj), int(yj)),
-                         color, 2, cv2.LINE_AA)
-        # Keypoint dots: colored by body region (2026-08-16). White dots
-        # on top of colored bones gave one flat "confetti" look that lost
-        # the region separation; per-region dots let each of the four
-        # colors read on both bones AND joints.
+                         color, 3, cv2.LINE_AA)
+        # Joints: filled dot in the limb color with a thin white ring so
+        # every articulation point reads as a distinct marker.
         for idx, (x, y, c) in enumerate(kps):
             if c >= min_conf:
                 col = _KP_COLORS.get(idx, (255, 255, 255))
-                cv2.circle(img, (int(x), int(y)), 3, col, -1, cv2.LINE_AA)
+                center = (int(x), int(y))
+                cv2.circle(img, center, 5, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.circle(img, center, 4, col, -1, cv2.LINE_AA)
     return img
+
+
+def classify_activity(kps, min_conf: float = KP_MIN_CONF,
+                      hop_norm: float | None = None) -> str | None:
+    """Coarse activity verdict from one skeleton (operator card field,
+    2026-08-24): LYING / SITTING / HANDS UP / WALKING / STANDING.
+
+    Posture rules only need the current frame; WALKING prefers the
+    caller-supplied `hop_norm` (per-tick centroid displacement over the
+    box diagonal, from the live tracker) and falls back to a stride
+    heuristic (ankle spread vs torso length) when no motion history
+    exists - honest but weaker, so single-frame callers may see a
+    striding person as STANDING. Returns None when the torso anchors are
+    below confidence (no verdict is better than a made-up one)."""
+    def _pt(i):
+        x, y, c = kps[i]
+        return (x, y) if c >= min_conf else None
+
+    l_sh, r_sh = _pt(L_SHOULDER), _pt(R_SHOULDER)
+    l_hip, r_hip = _pt(L_HIP), _pt(R_HIP)
+    if not (l_sh or r_sh) or not (l_hip or r_hip):
+        return None
+    sh = (((l_sh or r_sh)[0] + (r_sh or l_sh)[0]) / 2,
+          ((l_sh or r_sh)[1] + (r_sh or l_sh)[1]) / 2)
+    hip = (((l_hip or r_hip)[0] + (r_hip or l_hip)[0]) / 2,
+           ((l_hip or r_hip)[1] + (r_hip or l_hip)[1]) / 2)
+    import math
+    dx, dy = hip[0] - sh[0], hip[1] - sh[1]
+    torso_len = math.hypot(dx, dy) or 1.0
+    torso_angle = math.degrees(math.atan2(abs(dx), abs(dy) or 1e-6))
+    if torso_angle > 60:
+        return "LYING"
+    # Hands up: both wrists above their shoulders.
+    l_wr, r_wr = _pt(L_WRIST), _pt(R_WRIST)
+    if (l_wr and r_wr and l_sh and r_sh
+            and l_wr[1] < l_sh[1] and r_wr[1] < r_sh[1]):
+        return "HANDS UP"
+    # Sitting: knees nearly level with the hips (folded legs).
+    l_kn, r_kn = _pt(L_KNEE), _pt(R_KNEE)
+    knee = None
+    if l_kn or r_kn:
+        knee = (((l_kn or r_kn)[0] + (r_kn or l_kn)[0]) / 2,
+                ((l_kn or r_kn)[1] + (r_kn or l_kn)[1]) / 2)
+    if knee is not None and (knee[1] - hip[1]) < 0.35 * torso_len:
+        return "SITTING"
+    if hop_norm is not None and hop_norm > 0.055:
+        return "WALKING"
+    # Stride fallback: ankles clearly split -> mid-step.
+    l_an, r_an = _pt(L_ANKLE), _pt(R_ANKLE)
+    if (hop_norm is None and l_an and r_an
+            and abs(l_an[0] - r_an[0]) > 0.55 * torso_len):
+        return "WALKING"
+    return "STANDING"

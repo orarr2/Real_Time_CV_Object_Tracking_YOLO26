@@ -154,16 +154,86 @@ def detect_faces(frame) -> list[dict]:
 
 
 
+FACE_DRAW_COLOR = (0, 165, 255)   # uniform orange (operator 2026-08-24)
+
+
 def draw_faces(img, faces: list[dict]):
-    """Draw face boxes + confidence onto `img` in place (returns it)."""
+    """Draw face boxes onto `img` in place (returns it).
+
+    Operator direction 2026-08-24: ONE uniform orange for every face
+    (per-face colors could not be matched between frame and side cards)
+    plus a unique face NUMBER on the frame itself - the number is the
+    pairing key to the side card, and the confidence lives on the card
+    rather than cluttering the frame."""
     import cv2
 
-    for f in faces:
+    for i, f in enumerate(faces, 1):
         x1, y1 = int(f["x1"]), int(f["y1"])
         x2, y2 = int(f["x2"]), int(f["y2"])
-        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 220, 255), 2)
-        label = f'face {f.get("conf", 0):.2f}'
-        cv2.putText(img, label, (x1, max(12, y1 - 5)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 220, 255), 1,
+        f.setdefault("n", i)
+        cv2.rectangle(img, (x1, y1), (x2, y2), FACE_DRAW_COLOR, 2)
+        cv2.putText(img, str(f["n"]), (x1, max(14, y1 - 5)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, FACE_DRAW_COLOR, 2,
                     cv2.LINE_AA)
     return img
+
+
+# ---------------------------------------------------------------------------
+# Face-crop audit trail (operator request 2026-08-24): same idea as the
+# plate-crop store - each saved face crop lands at
+# src/data/face_crops/<cam>/<ts>_<n>_<conf>.jpg so the Investigation
+# flow can pull every angle a face was captured from and offer SAVE.
+# A per-cell cooldown stops the same standing person from flooding the
+# store every tick, and a rolling cap prunes the oldest files.
+# ---------------------------------------------------------------------------
+FACE_CROPS_ROOT = Path(__file__).resolve().parent.parent / "data" / "face_crops"
+FACE_CROP_COOLDOWN_S = 30.0
+FACE_CROPS_KEEP = int(os.environ.get("FACE_CROPS_KEEP") or 300)
+_face_crop_last: dict = {}
+
+
+def save_face_crops(cam_id: str, frame, faces: list[dict],
+                    now: float | None = None, pad: float = 0.25) -> int:
+    """Persist padded crops for this tick's faces; returns saves made.
+    Silent-on-failure by design - an audit trail must never break the
+    live tick."""
+    import time as _t
+    import cv2
+    if not faces:
+        return 0
+    now = now or _t.time()
+    H, W = frame.shape[:2]
+    out_dir = FACE_CROPS_ROOT / (cam_id or "unknown")
+    saved = 0
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for f in faces:
+            x1, y1 = int(f["x1"]), int(f["y1"])
+            x2, y2 = int(f["x2"]), int(f["y2"])
+            # cooldown key: coarse grid cell, so a static face saves at
+            # most once per FACE_CROP_COOLDOWN_S.
+            key = (cam_id, x1 // 64, y1 // 64)
+            if now - _face_crop_last.get(key, 0.0) < FACE_CROP_COOLDOWN_S:
+                continue
+            px = int((x2 - x1) * pad)
+            py = int((y2 - y1) * pad)
+            cx1, cy1 = max(0, x1 - px), max(0, y1 - py)
+            cx2, cy2 = min(W, x2 + px), min(H, y2 + py)
+            crop = frame[cy1:cy2, cx1:cx2]
+            if crop.size == 0:
+                continue
+            name = f"{int(now * 1000)}_{f.get('n', 0)}_" \
+                   f"{int(round(float(f.get('conf', 0)) * 100)):02d}.jpg"
+            cv2.imwrite(str(out_dir / name), crop)
+            _face_crop_last[key] = now
+            saved += 1
+        # rolling cap: prune oldest beyond FACE_CROPS_KEEP
+        files = sorted(out_dir.glob("*.jpg"))
+        for old in files[:-FACE_CROPS_KEEP]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    except Exception:
+        pass
+    return saved

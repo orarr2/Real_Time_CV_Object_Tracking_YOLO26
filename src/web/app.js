@@ -1696,34 +1696,9 @@ function _hudLoadSystemInfo() {
 }
 _hudLoadSystemInfo();
 
-// Header line updater. The "Model: loading..." placeholder used to be
-// swapped out by the removed RL script; without a replacement it stayed
-// forever. Now we pull the scoreboard from /api/model-metrics and format
-// a plain one-liner. Refreshes every 10 s.
-function _refreshHeaderMetricsLine() {
-  const el = document.getElementById("model-metrics-line");
-  if (!el) return;
-  fetch("/api/model-metrics", { cache: "no-store" })
-    .then((r) => (r.ok ? r.json() : null))
-    .then((d) => {
-      if (!d) return;
-      const line = d.header_line
-        || `reviews: ${d.reviews || 0}`;
-      const backend = (_hudSystemInfo && _hudSystemInfo.model)
-        ? ` - detector: ${_hudSystemInfo.model}` : "";
-      el.textContent = line + backend;
-    })
-    .catch(() => {
-      // On failure show the detector chip at least, don't stay stuck.
-      if (_hudSystemInfo && _hudSystemInfo.model) {
-        el.textContent = "detector: " + _hudSystemInfo.model;
-      } else {
-        el.textContent = "model info unavailable";
-      }
-    });
-}
-_refreshHeaderMetricsLine();
-setInterval(_refreshHeaderMetricsLine, 10000);
+// The header subtitle is a single static line in index.html (operator
+// direction 2026-08-24) - the old reviews/detector second line and its
+// 10 s poller are gone.
 
 function _updateAnalysisHud(a, d) {
   if (!a || !(a.bar || a.wrap)) return;

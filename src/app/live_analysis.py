@@ -795,10 +795,16 @@ def run_fire_inference(frame, conf: float = FIRE_CONF) -> list[dict]:
     for bb, ci, cf in zip(res.boxes.xyxy.tolist(),
                           res.boxes.cls.tolist(),
                           res.boxes.conf.tolist()):
+        cls = str(names.get(int(ci), "fire")).lower()
+        # 2026-08-24: the deployed detector (yolov26 fire finetune)
+        # carries an "other" background class - only actual fire/smoke
+        # verdicts may reach the layer.
+        if cls not in ("fire", "smoke"):
+            continue
         hits.append({
             "x1": int(bb[0]), "y1": int(bb[1]),
             "x2": int(bb[2]), "y2": int(bb[3]),
-            "cls": str(names.get(int(ci), "fire")),
+            "cls": cls,
             "conf": float(cf),
         })
     return hits
@@ -1272,6 +1278,16 @@ class LiveSession(threading.Thread):
                     layer = self.layer
                     if layer in ("pose", "gestures", "body"):
                         self._pose_pass(frame, boxes)
+                    if layer == "gestures":
+                        # Hand-landmark pass (2026-08-24): open palm /
+                        # fist / pointing on wrist crops, budgeted, and
+                        # silently absent when mediapipe or the model
+                        # file is not available on this machine.
+                        try:
+                            from app.hands import analyze_hands
+                            analyze_hands(frame, boxes)
+                        except Exception:
+                            pass
                     if layer == "plates":
                         # 2026-08-17: operator wants LPR to run on live streams
                         # regardless of kind. YouTube pixels are compressed and
@@ -1595,7 +1611,18 @@ class LiveSession(threading.Thread):
                 and (f["y2"] - f["y1"]) >= 16]
             faces_from_yunet.sort(key=lambda f: -float(f.get("conf") or 0))
         if faces_from_yunet:
-            return faces_from_yunet[:32]
+            kept = faces_from_yunet[:32]
+            for _n, _f in enumerate(kept, 1):
+                _f["n"] = _n
+            # Face-crop audit trail (2026-08-24): same idea as the plate
+            # crops - padded crops land under src/data/face_crops/<cam>
+            # with a per-cell cooldown and a rolling cap, so the
+            # Investigation flow can pull and SAVE any face later.
+            try:
+                _faces.save_face_crops(self.cam_id, frame, kept)
+            except Exception:
+                pass
+            return kept
         # Pose-keypoint fallback (2026-08-16, operator: "old version
         # detected faces here"). YuNet often returns zero on far-field or
         # partly-turned faces the pose model can still anchor on. We run

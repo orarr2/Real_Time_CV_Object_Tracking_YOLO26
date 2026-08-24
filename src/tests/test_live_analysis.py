@@ -183,14 +183,20 @@ CAP_H = 60   # everything below this row must be untouched by caption-only layer
 
 
 def test_pose_layer_draws_no_detection_boxes():
+    # 2026-08-24 contract update: every PERSON gets a stable per-track
+    # colored box (color pairs the object with its side card), with or
+    # without a skeleton. Vehicles stay unannotated - the layer is still
+    # people-only.
     img = np.zeros((*SHAPE, 3), dtype=np.uint8)
     person = _box(100, 100)                          # no kps -> too far
+    person["tid"] = 7
     car = _box(400, 200, w=100, h=40, cls="car")
     out = la.draw_pose_layer(img.copy(), [person, car])
-    assert out[CAP_H:].sum() == 0                    # no boxes, no skeleton
+    assert out[100:170, 90:140].sum() > 0            # person box drawn
+    assert out[200:240, 400:500].sum() == 0          # car untouched
     person["kps"] = _kps_for(person)
     out2 = la.draw_pose_layer(img.copy(), [person, car])
-    assert out2[CAP_H:].sum() > 0                    # skeleton appeared
+    assert out2[CAP_H:].sum() > out[CAP_H:].sum()    # skeleton added ink
     # ...and the car region still has no annotation.
     assert out2[200:240, 400:500].sum() == 0
 
@@ -209,10 +215,11 @@ def test_gestures_layer_honest_when_empty():
 
 
 def test_body_layer_flags_only_anomalies():
-    # 2026-08-16 semantic: EVERY person gets a neutral grey box so the
-    # operator still sees where people are; alert-grade flags overlay a
-    # thicker red box + banner on top. Walker gets a grey outline (not
-    # blank), faller gets both grey base + red highlight.
+    # 2026-08-24 contract: EVERY person gets their stable per-track
+    # COLOR box (pairs with the side card by color); alert-grade flags
+    # still overlay a thicker red box + banner on top. The walker's box
+    # must therefore match track_color(1) exactly - not the alert red.
+    from app.layers.draw import track_color
     img = np.zeros((*SHAPE, 3), dtype=np.uint8)
     walker = _box(100, 100); walker["track_id"] = 1
     faller = _box(300, 100); faller["track_id"] = 2
@@ -221,17 +228,23 @@ def test_body_layer_flags_only_anomalies():
     out = la.draw_body_layer(img.copy(), [walker, faller], stats)
     walker_pixels = out[100:170, 90:140]
     faller_pixels = out[100:170, 295:340]
-    assert walker_pixels.sum() > 0                   # walker: neutral grey box
-    # Walker is NEUTRAL grey (140,140,140) - no red channel dominance.
-    assert walker_pixels[..., 2].max() < 200         # walker not red-flagged
+    assert walker_pixels.sum() > 0                   # walker: colored box
+    # Walker's ink is its track color, NOT the (0,0,220) alert red:
+    # collect the walker box's non-black pixels and check the palette
+    # color appears while pure alert red does not dominate.
+    wcol = np.array(track_color(1), dtype=np.uint8)
+    nz = walker_pixels[walker_pixels.sum(axis=2) > 0]
+    assert (nz == wcol).all(axis=1).any()            # palette color present
+    alert_red = (nz[:, 2] > 200) & (nz[:, 1] < 60) & (nz[:, 0] < 60)
+    assert not alert_red.any()                       # no alert red on walker
     assert faller_pixels.sum() > walker_pixels.sum() # faller more heavily drawn
     assert faller_pixels[..., 2].max() > 180         # faller box in red
     assert out[10:40, 200:460, 2].max() > 150        # red ALERT banner
-    # No alert-grade flag -> banner absent, walker still shown neutrally.
+    # No alert-grade flag -> banner absent, walker still shown in color.
     calm = la.draw_body_layer(img.copy(), [walker],
                               {1: {"id": 1, "label": "walking",
                                    "alert": False}})
-    assert calm[100:170, 90:140].sum() > 0           # walker grey box drawn
+    assert calm[100:170, 90:140].sum() > 0           # walker box drawn
     assert calm[10:40, 300:460].sum() == 0           # no red banner
 
 

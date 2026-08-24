@@ -82,11 +82,17 @@ _REFERENCE_METRICS = {
         "params_m": 9.4,
     },
     "yolo_fire.pt": {
-        "dataset": "SHOU-ISD fire-and-smoke val split",
-        "source":  "huggingface.co/SHOU-ISD/fire-and-smoke",
-        "mAP50":   0.812,
-        "mAP5095": 0.542,
-        "params_m": 3.2,
+        # Replaced 2026-08-24: the previous weight (and its claimed
+        # SHOU-ISD provenance) turned out to be a mislabeled retail-
+        # bottle model that could never detect fire. The deployed
+        # detector is a YOLO26 fire finetune verified on a real bonfire
+        # photo (fire at 0.95); the HF card publishes no val-split
+        # numbers, so none are shown rather than fabricated ones.
+        "dataset": "SalahALHaismawi/yolov26-fire-detection",
+        "source":  "huggingface.co/SalahALHaismawi/yolov26-fire-detection",
+        "mAP50":   None,
+        "mAP5095": None,
+        "params_m": None,
     },
     "face_detection_yunet_2023mar.onnx": {
         "dataset": "WIDER FACE val (Easy)",

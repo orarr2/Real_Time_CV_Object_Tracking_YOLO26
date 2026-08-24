@@ -65,3 +65,4 @@ src/data/lines/
 src/data/plate_crops/
 src/data/*.db
 src/data/*.csv
+*.task

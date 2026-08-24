@@ -21,6 +21,36 @@ FIRE_CONFIRM_TICKS = 2
 BODY_ANOMALY_LABELS = frozenset({"fall_suspect", "erratic",
                                  "sudden_motion", "fighting"})
 
+# Stable per-track colors (operator direction 2026-08-24): every tracked
+# object keeps ONE distinct color for its box, trail, and side card, so
+# the eye pairs card-to-object by color instead of chasing leader lines.
+# 12 well-separated hues (BGR); tid hashes into the palette, so a track
+# keeps its color for its whole life and collisions only start when more
+# than 12 objects share the frame.
+TRACK_PALETTE = (
+    (80, 200, 255),   # amber
+    (90, 90, 245),    # red
+    (220, 160, 70),   # blue
+    (120, 210, 120),  # green
+    (230, 100, 200),  # purple
+    (90, 220, 220),   # yellow
+    (200, 200, 120),  # aqua
+    (140, 120, 245),  # rose
+    (245, 190, 140),  # light blue
+    (100, 160, 230),  # orange
+    (200, 140, 170),  # violet
+    (150, 220, 170),  # light green
+)
+
+
+def track_color(tid) -> tuple:
+    """Stable BGR color for a track id."""
+    try:
+        idx = int(tid) % len(TRACK_PALETTE)
+    except (TypeError, ValueError):
+        idx = 0
+    return TRACK_PALETTE[idx]
+
 
 # ---------------------------------------------------------------------------
 # Layer renderers - each draws ONLY its layer's semantics + an honest
@@ -97,21 +127,31 @@ def draw_paths_layer(img, tracks, last_boxes: list[dict],
     """Trails + id boxes + km/h chips - the one layer that legitimately
     shows detection boxes for every class."""
     import cv2
-    from app.behavior import _TRAIL_COLORS
-    from app.detect_core import draw_boxes
     for tr in tracks:
         # A track in miss state has no current match - its trail floating
         # over vacated pixels reads as ghost spaghetti. Draw matched only.
         if tr.misses:
             continue
-        color = _TRAIL_COLORS[(tr.tid - 1) % len(_TRAIL_COLORS)]
+        # Trail shares the track's stable color (2026-08-24) so box,
+        # trail and side card all pair by one hue.
+        color = track_color(tr.tid)
         pts = [(int((b["x1"] + b["x2"]) / 2), int((b["y1"] + b["y2"]) / 2))
                for b in tr.boxes[-TRAIL_MAX_PTS:]]
         for p0, p1 in zip(pts, pts[1:]):
             cv2.line(img, p0, p1, color, 2, cv2.LINE_AA)
         if pts:
             cv2.circle(img, pts[0], 4, color, -1, cv2.LINE_AA)
-    img = draw_boxes(img, last_boxes)
+    for b in last_boxes:
+        # Per-track colored box + id/class tag (replaces the class-color
+        # draw_boxes pass, operator direction 2026-08-24).
+        _tid = b.get("track_id", b.get("tid"))
+        col = track_color(_tid)
+        x1, y1 = int(b.get("x1", 0)), int(b.get("y1", 0))
+        cv2.rectangle(img, (x1, y1),
+                      (int(b.get("x2", 0)), int(b.get("y2", 0))), col, 2)
+        tag = f"#{_tid} {b.get('cls', '')}".strip()
+        cv2.putText(img, tag, (x1 + 4, max(y1 + 16, 16)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, col, 2, cv2.LINE_AA)
     for b in last_boxes:
         s = stats_by_id.get(b.get("track_id"))
         # km/h honesty gate (audit 2026-08-14: moving bikes chipped
@@ -246,12 +286,21 @@ def draw_zones_layer(img, entries: list[dict], kind: str):
 
 
 def draw_pose_layer(img, boxes: list[dict]):
-    """Skeletons ONLY, on people close enough for the per-crop pose pass.
-    No detection boxes, no vehicles - fix 2's core layer-correctness
-    complaint."""
+    """Skeletons on people close enough for the per-crop pose pass, each
+    person framed in their stable track color with a #id tag (operator
+    direction 2026-08-24: unique color pairs the object with its side
+    card). No vehicles - fix 2's core layer-correctness complaint."""
+    import cv2
     from app.pose import draw_skeleton
     persons = [b for b in boxes if b.get("cls") == "person"]
     withk = [b for b in persons if b.get("kps")]
+    for b in persons:
+        # Colored box only - the #id lives on the side card, not inside
+        # the video (operator direction 2026-08-24: no double labeling).
+        col = track_color(b.get("tid"))
+        x1, y1 = int(b.get("x1", 0)), int(b.get("y1", 0))
+        x2, y2 = int(b.get("x2", 0)), int(b.get("y2", 0))
+        cv2.rectangle(img, (x1, y1), (x2, y2), col, 2, cv2.LINE_AA)
     if withk:
         draw_skeleton(img, withk)
     if not persons:
@@ -325,21 +374,36 @@ def draw_plates_layer(img, boxes: list[dict]):
 
 def draw_gestures_layer(img, boxes: list[dict], stats_by_id: dict,
                         session_counts: dict | None = None):
-    """Skeleton + gesture chip only for people with a DETECTED gesture."""
+    """Skeleton + gesture chip only for people with a DETECTED gesture.
+
+    Two gesture families since 2026-08-24: arm poses from the skeleton
+    (hand raised / both hands up / wave) and hand-landmark verdicts from
+    app.hands stamped on the box (`hand_gesture`: open_palm / fist /
+    pointing + `hand_dir`)."""
     from app.pose import draw_skeleton
+    _HAND_WORDS = {"open_palm": "OPEN PALM", "fist": "FIST",
+                   "pointing": "POINTING"}
     active = []
     for b in boxes:
         if b.get("cls") != "person" or not b.get("kps"):
             continue
         s = stats_by_id.get(b.get("track_id"))
-        if s and s.get("gestures"):
-            active.append((b, s))
-    for b, s in active:
+        labels = list((s or {}).get("gestures") or ())
+        hg = b.get("hand_gesture")
+        if hg:
+            word = _HAND_WORDS.get(hg, hg.upper())
+            if b.get("hand_dir"):
+                word += f" {b['hand_dir']}"
+            labels.append(word)
+        if labels:
+            active.append((b, s or {}, labels))
+    for b, s, labels in active:
         draw_skeleton(img, [b])
-        _chip(img, b, "+".join(s["gestures"]), (190, 120, 0))
+        _chip(img, b, "+".join(labels), (190, 120, 0))
     note = ("Hand gestures - "
-            + ", ".join(f"#{s.get('id', '?')} {'+'.join(s['gestures'])}"
-                        for _, s in active)
+            + ", ".join(f"#{s.get('id', b.get('track_id', '?'))} "
+                        f"{'+'.join(labels)}"
+                        for b, s, labels in active)
             if active else "Hand gestures - none detected right now")
     lines = [note]
     if session_counts is not None:
@@ -374,10 +438,19 @@ def draw_body_layer(img, boxes: list[dict], stats_by_id: dict,
         elif is_sudden:
             flagged.append((b, {}, True))
     for b in persons:
-        # Neutral box so the operator still sees where people are, but
-        # flagged persons get a red overlay on top.
+        # Stable per-track color (operator direction 2026-08-24) so each
+        # person pairs with their side card by color; the #id lives on
+        # the card only, and flagged persons get the red overlay on top.
+        col = track_color(b.get("track_id", b.get("tid")))
         cv2.rectangle(img, (int(b["x1"]), int(b["y1"])),
-                      (int(b["x2"]), int(b["y2"])), (140, 140, 140), 1)
+                      (int(b["x2"]), int(b["y2"])), col, 2)
+    # Skeletons on EVERY person with keypoints (operator direction
+    # 2026-08-24): the anomaly verdict is judged visually against the
+    # full-scene pose picture, not only on flagged tracks.
+    _withk = [b for b in persons if b.get("kps")]
+    if _withk:
+        from app.pose import draw_skeleton
+        draw_skeleton(img, _withk)
     for b, s, is_sudden in flagged:
         color = (0, 0, 220) if (s.get("alert") or is_sudden) else (0, 150, 230)
         cv2.rectangle(img, (int(b["x1"]), int(b["y1"])),
@@ -392,9 +465,6 @@ def draw_body_layer(img, boxes: list[dict], stats_by_id: dict,
                        cv2.LINE_AA)
             cv2.circle(img, (cx, cy), r_halo + 4, (0, 0, 120), 1,
                        cv2.LINE_AA)
-        if b.get("kps"):
-            from app.pose import draw_skeleton
-            draw_skeleton(img, [b])
         parts = [f"#{s.get('id', b.get('track_id', '?'))}"]
         if is_sudden:
             parts.append("SUDDEN MOTION")
@@ -471,7 +541,20 @@ def draw_heat_layer(img, grid: list, since: float | None = None):
     note += f" | peak={peak:.2f}, nonzero_cells={nonzero}"
     if peak <= 0:
         note += " (no activity banked yet - wait for people to appear in frame)"
-    return _caption(out, [note])
+        return _caption(out, [note])
+    # Verbal legend (operator request 2026-08-24): name WHERE the
+    # hottest concentration sits, as a 3x3 compass region of the frame.
+    py, px, best = 0, 0, -1.0
+    for gy, row in enumerate(grid):
+        for gx, v in enumerate(row):
+            if v > best:
+                py, px, best = gy, gx, v
+    rows_n, cols_n = max(len(grid), 1), max(len(grid[0]), 1)
+    vert = ("top", "center", "bottom")[min(2, py * 3 // rows_n)]
+    horz = ("left", "center", "right")[min(2, px * 3 // cols_n)]
+    region = "center" if (vert, horz) == ("center", "center") \
+        else f"{vert}-{horz}"
+    return _caption(out, [note, f"hottest concentration: {region} of frame"])
 
 
 def draw_line_layer(img, line: list, cross: dict):
