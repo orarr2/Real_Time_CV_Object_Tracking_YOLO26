@@ -523,24 +523,38 @@ document.addEventListener("fullscreenchange", () => {
   setTimeout(() => updateScCaptureBbox(null), 500);
 });
 
-// Poll /api/analysis/saved and populate the strip with plate crops only.
-// Runs whenever cinema is active (once every 3 s) so a fresh save lands
+// Populate the cinema strip with plate crops. Live LPR crops come from
+// /api/analysis/plate-crops (each row carries `url`); if none exist yet
+// fall back to plate rows in the saved-events gallery, whose rows carry
+// `image` (NOT url/file/path - reading only the latter left the strip
+// permanently empty in cinema, reported by the operator 2026-08-24).
+// Runs whenever cinema is active (once every 3 s) so a fresh crop lands
 // in the strip within a tick.
 setInterval(async () => {
   const strip = window.__cinemaStrip;
   if (!strip || !document.body.classList.contains("cinema-active")) return;
   try {
-    const r = await fetch("/api/analysis/saved", { cache: "no-store" });
-    if (!r.ok) return;
-    const j = await r.json();
-    const rows = (j.items || j.saved || []).filter(x =>
-      (x.layer === "plates") || /plate/i.test(x.file || x.name || ""));
+    let rows = [];
+    const cam = SINGLE_CAM_ID;
+    if (cam) {
+      const rc = await fetch(
+        `/api/analysis/plate-crops?cam=${encodeURIComponent(cam)}`,
+        { cache: "no-store" });
+      if (rc.ok) rows = ((await rc.json()).items || []);
+    }
+    if (!rows.length) {
+      const r = await fetch("/api/analysis/saved", { cache: "no-store" });
+      if (!r.ok) return;
+      const j = await r.json();
+      rows = (j.items || j.saved || []).filter(x =>
+        (x.layer === "plates") || /plate/i.test(x.file || x.name || ""));
+    }
     if (!rows.length) return;
     const label = strip.querySelector(".lbl");
     strip.innerHTML = "";
     if (label) strip.appendChild(label);
     for (const row of rows.slice(0, 12)) {
-      const src = row.url || row.file || row.path;
+      const src = row.url || row.file || row.path || row.image;
       if (!src) continue;
       const img = document.createElement("img");
       img.src = src.startsWith("/") ? src : "/" + src;

@@ -1,10 +1,10 @@
 # Project guide - Real-Time CV Object Tracking (YOLO26)
 
 > **Changes in the 2026-08-23 session** (full decision log in
-> `AUDIT_2026-08-23.md`): ~1,900 lines of dead code removed (dead server
+> `docs/AUDIT_2026-08-23.md`): ~1,900 lines of dead code removed (dead server
 > endpoints, burst-analytics chain, blur path, live_samples /
 > anomaly_crops / calibrate_conf); plate detector upgraded to
-> yolov11-L + OCR to fast-plate-ocr `cct_s_v2` + pose to `yolov8s-pose`;
+> yolov11-S + OCR to fast-plate-ocr `cct_s_v2` + pose to `yolov8s-pose`;
 > body-anomaly gates hardened (ratio 8, 10-sample/10-s bbox window,
 > 2-tick debounce, 60-px both-fast fighting rule); fall detection
 > folded into the Body layer; per-country plate grammar; hot-trail decay +
@@ -164,7 +164,7 @@ reads) is what the dashboard tab sees over its polling loop.
 | `line`     | `cameras.py`, live_analysis | Counting line drawn by the operator. In / out determined by sign flip across A -> B.          |
 | `loiter`   | `live_analysis.py` (zones)  | Polygon dwell detection with per-track cooldown (folds into the parking layer's zone engine). |
 | `parking`  | `live_analysis.py` (inline) | Occupancy flip on operator-drawn spots plus a 12 s per-spot re-probe.                         |
-| `plates`   | `plates.py`                 | Two-stage LPR (yolov11-L + fast-plate-ocr cct_s_v2) with per-track cache, multi-frame integration and a per-country grammar gate. |
+| `plates`   | `plates.py`                 | Two-stage LPR (yolov11-S + fast-plate-ocr cct_s_v2) with per-track cache, multi-frame integration and a per-country grammar gate. |
 | `heat`     | `heatmap.py`                | 48x27 grid, foot-point accumulation, 180 s half-life decay.                                   |
 
 ## 3. Confidence thresholds and display gates

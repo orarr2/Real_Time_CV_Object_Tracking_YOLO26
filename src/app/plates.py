@@ -79,15 +79,15 @@ def _find_weight(bare_name: str) -> str:
     return bare_name
 
 
-# Plate detector: YOLOv11-L license-plate finetune (~51 MB,
-# morsetechlab/yolov11-license-plate-detection on HF). Operator decision
-# 2026-08-23 ("accuracy above all, as long as the system holds"): the
-# Large variant replaces Small. Bench on this host, 17 saved street
-# frames @256px: s=239 ms, m=522 ms, l=868 ms per inference, identical
-# hit counts on the available material - the operator chose the top
-# size for the accuracy headroom on hard plates. A missing file means
-# the notebook setup cell has not fetched it yet.
-PLATE_WEIGHTS_DEFAULT = _find_weight("yolov11l-plate.pt")
+# Plate detector: YOLOv11-S license-plate finetune (~19 MB,
+# morsetechlab/yolov11-license-plate-detection on HF). Bench on this
+# host, 17 saved street frames @256px: s=239 ms, m=522 ms, l=868 ms per
+# inference, identical hit counts on the available material. The Large
+# variant was trialed first under "accuracy above all", but a live run
+# showed 36 s ticks at 97% RAM on the target machine, so the operator
+# reverted to Small (2026-08-23). A missing file means the notebook
+# setup cell has not fetched it yet.
+PLATE_WEIGHTS_DEFAULT = _find_weight("yolov11s-plate.pt")
 PLATE_OCR_DEFAULT = _find_weight("plate_ocr_global.onnx")
 
 # Plate-detector confidence floor on the vehicle crop. Permissive on
