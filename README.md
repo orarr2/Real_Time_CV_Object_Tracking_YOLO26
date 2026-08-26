@@ -10,11 +10,12 @@ fires confirmed before they alarm, parking spots discovered on their
 own, and every detection archived with the frame that proves it. All of
 it runs locally, on CPU, from a single `Run All`.
 
-![Live LPR](media/plates_reads.jpg)
+![License plates live](media/design_plates.jpg)
 
-*Four plates read on one frame of a live Koh Samui street camera. Green
-carries the OCR text and confidence; amber marks vehicles in range that
-have not produced a confident read - the system never invents one.*
+*The License-plates layer on a live Koh Samui street: every vehicle
+carries a side card in its own identity color, amber marks plates
+hunted in range, and a read appears only when the two-stage OCR earns
+it - the system never invents one.*
 
 ## Ten analysis layers, one at a time, on live video
 
@@ -40,13 +41,11 @@ street cameras in Thailand - no mockups, no staged scenes.
 told apart left from right.
 
 ![Pose design](media/design_pose.jpg)
-![Pose skeletons](media/pose_skeletons.jpg)
 
-**Body anomalies.** Skeletons on everyone, red alert on the one that
-matters.
+**Body anomalies.** Skeletons on everyone, side cards ready to flag
+the one that matters.
 
 ![Body design](media/design_body.jpg)
-![Body anomaly alert](media/body_anomaly_alert.jpg)
 
 **Hand gestures.** Two open palms caught on a night street, from
 21-point hand landmarks.
@@ -57,38 +56,26 @@ matters.
 a second-scale pass.
 
 ![Faces design](media/design_faces.jpg)
-![Face detection](media/faces_detect.jpg)
 
 **Paths and speeds.** Trail, box and identity share one color per
 object.
 
 ![Paths design](media/design_paths.jpg)
-![Paths tracks](media/paths_tracks.jpg)
 
-**Heat.** An hour and a half of dwell, burned into the pavement.
+**Heat.** Dwell blooming over the walking routes, with a verbal
+hottest-spot legend.
 
 ![Heat design](media/design_heat.jpg)
-![Heat overlay](media/heat_overlay.jpg)
 
-**Line crossing.** 37 in, 44 out, counted on foot-of-box side flips.
+**Line crossing.** In and Out counted on foot-of-box side flips across
+the operator's line.
 
-![Line crossing](media/line_crossing.jpg)
 ![Line design](media/design_line.jpg)
 
-**Fire.** The detector confirming a real bonfire at 0.95 - and staying
-silent on fire-free streets.
+**Parking.** Spots discovered from parked-vehicle persistence,
+occupancy live.
 
-![Fire design](media/design_fire.jpg)
-
-**Parking.** Seven spots the system drew for itself, two occupied.
-
-![Parking occupancy](media/parking_spots.jpg)
 ![Parking design](media/design_parking.jpg)
-
-**License plates.** The full pipeline view with the audit trail of real
-reads.
-
-![Plates design](media/design_plates.jpg)
 
 ## The engine
 
