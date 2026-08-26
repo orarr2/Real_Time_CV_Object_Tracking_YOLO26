@@ -373,6 +373,38 @@ def _yt_opts(client: str) -> dict:
     return opts
 
 
+class _YtQuietLogger:
+    """Swallows yt-dlp's per-client noise (2026-08-24). The client try
+    loop EXPECTS most innertube clients to fail - broken ones print
+    "No video formats found!" / "The page needs to be reloaded" at
+    ERROR level, which bypasses quiet/no_warnings and lands straight in
+    the notebook cell output even when the very next client succeeds.
+    Errors are collected here instead and surface only when EVERY
+    client fails, where they are real diagnostics."""
+
+    def __init__(self):
+        self.errors: list[str] = []
+
+    def debug(self, msg):
+        pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        pass
+
+    def error(self, msg):
+        self.errors.append(str(msg))
+
+
+# Last innertube client that actually produced a stream in this process.
+# Tried FIRST on later resolves: YouTube breaks clients on a rolling
+# schedule, so whichever one works now usually keeps working for the
+# session - skipping the dead ones saves several seconds per resolve.
+_YT_LAST_GOOD_CLIENT: str | None = None
+
+
 _YT_HLS_MANIFEST_RE = re.compile(r'"hlsManifestUrl"\s*:\s*"([^"]+)"')
 
 
@@ -403,23 +435,35 @@ def resolve_youtube(url: str) -> str:
     stream, then falls back to scraping the watch page itself - the scrape
     frequently survives the bot-wall that blocks yt-dlp's API clients."""
     import yt_dlp
+    global _YT_LAST_GOOD_CLIENT
 
     if not url.startswith("http"):                      # bare 11-char video id
         url = f"https://www.youtube.com/watch?v={url}"
+    clients = [c.strip() for c in _YT_PLAYER_CLIENTS]
+    if _YT_LAST_GOOD_CLIENT in clients:
+        clients.remove(_YT_LAST_GOOD_CLIENT)
+        clients.insert(0, _YT_LAST_GOOD_CLIENT)
     last = None
-    for client in _YT_PLAYER_CLIENTS:
+    attempts: list[str] = []
+    for client in clients:
+        log = _YtQuietLogger()
         opts = _yt_opts(client)
+        opts["logger"] = log
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
             if info.get("url"):
+                _YT_LAST_GOOD_CLIENT = client
                 return info["url"]
         except Exception as e:
             last = e
+        if log.errors:
+            attempts.append(f"{client}: {log.errors[-1]}")
     scraped = _yt_scrape_hls(url)
     if scraped:
         return scraped
-    raise RuntimeError(f"youtube: no client resolved a stream ({last})")
+    detail = "; ".join(attempts[-4:]) or str(last)
+    raise RuntimeError(f"youtube: no client resolved a stream ({detail})")
 
 
 # ---- Resolved-stream cache ------------------------------------------------
