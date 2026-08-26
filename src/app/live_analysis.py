@@ -2445,6 +2445,14 @@ class LiveSession(threading.Thread):
                     g = _static_postures(jb["kps"])
                     if g:
                         jb["gestures"] = g
+                if layer == "gestures" and tr.cls == "person" \
+                        and last.get("hand_gesture"):
+                    # Hand-landmark verdict from app.hands (2026-08-24)
+                    # rides to the canvas so OPEN PALM / FIST / POINTING
+                    # chips render live, not only in the backend JPEG.
+                    jb["hand_gesture"] = last["hand_gesture"]
+                    if last.get("hand_dir"):
+                        jb["hand_dir"] = last["hand_dir"]
                 if (layer == "body" and tr.cls == "person"
                         and tr.tid not in riders_pub):
                     try:

@@ -1,378 +1,157 @@
 # Real-Time CV Object Tracking - YOLO26
 
-> **Changes in the 2026-08-23 session** (full decision log in
-> `docs/AUDIT_2026-08-23.md`): ~1,900 lines of dead code removed (dead server
-> endpoints, burst-analytics chain, blur path, live_samples /
-> anomaly_crops / calibrate_conf); plate detector upgraded to
-> yolov11-S + OCR to fast-plate-ocr `cct_s_v2` + pose to `yolov8s-pose`
-> (the L plate variant was trialed and reverted: 36 s ticks on this CPU);
-> body-anomaly gates hardened (ratio 8, 10-sample/10-s bbox window,
-> 2-tick debounce, 60-px both-fast fighting rule); fall detection
-> folded into the Body layer; per-country plate grammar; hot-trail decay +
-> 15-s replay ring; PDT clock-sync probe implemented; per-layer drawers
-> split into `app/layers/draw.py`. Thresholds reference:
-> `src/docs/DECISION_THRESHOLDS_HE.md`.
+**Point it at any live street camera. Get a working video-intelligence
+station.**
 
+One notebook turns a public webcam into a real-time analysis dashboard:
+people and vehicles tracked with stable identities, license plates
+located and read in two stages, skeletons drawn on every pedestrian,
+fires confirmed before they alarm, parking spots discovered on their
+own, and every detection archived with the frame that proves it. All of
+it runs locally, on CPU, from a single `Run All`.
 
-Single-camera live analysis dashboard for public street webcams. Pick one
-camera (Thailand catalog or an uploaded MP4/MKV), run YOLO26 detection plus
-one of 10 analysis layers on top of the live video.
+![Live LPR](media/plates_reads.jpg)
 
-- **Frontend:** static HTML/JS + Chart.js. HLS via `hls.js`, YouTube via
-  iframe embed. Canvas overlay draws boxes on top of the live video with
-  client-side interpolation between backend detection ticks.
-- **Backend:** small threaded HTTP server (`src/serve.py`) hosting the
-  analysis endpoints and the static UI. YOLO26 runs on OpenVINO CPU cache.
-- **Notebook:** `real_time_cv.ipynb` walks through single-frame check,
-  footfall time-series, dwell tracking, re-ID and business score before
-  binding the same dashboard inline for exploratory work.
+*Four plates read on one frame of a live Koh Samui street camera. Green
+carries the OCR text and confidence; amber marks vehicles in range that
+have not produced a confident read - the system never invents one.*
 
-## Layer gallery
+## Ten analysis layers, one at a time, on live video
 
-Representative backend-rendered frames, captured live on the Soi Green
-Mango (Chaweng, Koh Samui) YouTube webcam during the full 10-layer
-verification runs of 2026-08-23/24. Each frame is what the backend
-actually draws before the JPEG leaves the process; the dashboard's
-canvas overlay draws the same boxes on top of the live video for
-smoothness between backend ticks.
+| Layer | What it does |
+|---|---|
+| Paths | Per-object trails with stable identity colors and honest speed tiers. |
+| Pose | Six-region skeletons with left/right limb separation on every pedestrian in range. |
+| Gestures | Arm poses plus hand-landmark verdicts: open palm, fist, pointing with direction. |
+| Body | Kinematic anomaly watch: sudden motion, fighting, posture-based fall suspects. |
+| Faces | YuNet detection with a far-face rescue pass and a numbered, uniform display. |
+| Heat | Full-frame thermal view accumulating dwell, with a verbal hottest-spot legend. |
+| Line | Operator-drawn tripwire with direction-aware In/Out counters. |
+| Fire | Dedicated fire + smoke detector, two-tick confirmation before the banner. |
+| Parking | Spots discovered automatically from parked-vehicle persistence, live occupancy. |
+| Plates | Two-stage LPR: plate finder inside each vehicle crop, then multi-script OCR with per-country grammar. |
 
-![License plate reads](docs/proof/plates_reads.jpg)
+## The layers, live
 
-*License plates (two-stage LPR) - 4 plates read on one frame: green
-boxes carry the OCR text + confidence (Thai plates read via the
-multi-script OCR chain), orange boxes are vehicles in range that gave
-no confident read - shown honestly as "no-read".*
+Every image below is real output of the shipping pipeline on live
+street cameras in Thailand - no mockups, no staged scenes.
 
-![Line crossing](docs/proof/line_crossing.jpg)
+**Pose and skeleton.** Each person keeps one identity color; limbs are
+told apart left from right.
 
-*Line crossing - operator-drawn tripwire with a direction arrow; the
-In/Out counters accumulate on foot-of-box side flips (37 in / 44 out
-at this point of the session).*
+![Pose design](media/design_pose.jpg)
+![Pose skeletons](media/pose_skeletons.jpg)
 
-![Heat overlay](docs/proof/heat_overlay.jpg)
+**Body anomalies.** Skeletons on everyone, red alert on the one that
+matters.
 
-*Heat signature - 48x27 activity grid accumulated for 104 minutes with
-a 180 s half-life; hot blobs sit exactly on the parked-scooter rows and
-the walking lane.*
+![Body design](media/design_body.jpg)
+![Body anomaly alert](media/body_anomaly_alert.jpg)
 
-![Face detection](docs/proof/faces_detect.jpg)
+**Hand gestures.** Two open palms caught on a night street, from
+21-point hand landmarks.
 
-*Faces - YuNet with a second-pass 1.5x upscale rescue for far faces;
-4 faces boxed on this frame, including a helmeted rider.*
+![Gestures design](media/design_gestures.jpg)
 
-![Parking occupancy](docs/proof/parking_spots.jpg)
+**Faces.** Numbered on the frame, uniform orange, far faces rescued by
+a second-scale pass.
 
-*Parking - 7 auto-detected spots with live occupancy state (2/7
-occupied here); a spot flipping free/occupied emits an event.*
+![Faces design](media/design_faces.jpg)
+![Face detection](media/faces_detect.jpg)
 
-![Paths and speeds](docs/proof/paths_tracks.jpg)
+**Paths and speeds.** Trail, box and identity share one color per
+object.
 
-*Paths & speeds - per-track IDs, trail history and a speed tier per
-moving object; 8 tracked on this frame.*
+![Paths design](media/design_paths.jpg)
+![Paths tracks](media/paths_tracks.jpg)
 
-![Body anomaly alert](docs/proof/body_anomaly_alert.jpg)
+**Heat.** An hour and a half of dwell, burned into the pavement.
 
-*Body anomalies - kinematic verdicts per person track; the red ALERT
-banner + red halo mark a live "sudden motion" event on person #268.
-Posture-based fall suspects run inside this same layer.*
+![Heat design](media/design_heat.jpg)
+![Heat overlay](media/heat_overlay.jpg)
 
-![Pose skeletons](docs/proof/pose_skeletons.jpg)
+**Line crossing.** 37 in, 44 out, counted on foot-of-box side flips.
 
-*Pose & skeleton - COCO-17 top-down keypoints drawn on every person crop
-tall enough for legible joints (6 of 10 people in view on this frame).*
+![Line crossing](media/line_crossing.jpg)
+![Line design](media/design_line.jpg)
 
-## Table of contents
+**Fire.** The detector confirming a real bonfire at 0.95 - and staying
+silent on fire-free streets.
 
-- [Quick start](#quick-start)
-- [Prerequisites](#prerequisites)
-- [What the model predicts](#what-the-model-predicts)
-- [Camera catalog and video sources](#camera-catalog-and-video-sources)
-- [Analysis layers](#analysis-layers)
-- [Model files](#model-files)
-- [Notebook](#notebook)
-- [Dashboard](#dashboard)
-- [Repository layout](#repository-layout)
-- [Troubleshooting](#troubleshooting)
-- [YouTube blocked by bot-check? Screen-capture fallback](#youtube-blocked-by-bot-check-screen-capture-fallback)
+![Fire design](media/design_fire.jpg)
+
+**Parking.** Seven spots the system drew for itself, two occupied.
+
+![Parking occupancy](media/parking_spots.jpg)
+![Parking design](media/design_parking.jpg)
+
+**License plates.** The full pipeline view with the audit trail of real
+reads.
+
+![Plates design](media/design_plates.jpg)
+
+## The engine
+
+| Model | Role |
+|---|---|
+| YOLO26-X (OpenVINO CPU) | Primary detector for every layer. |
+| yolov11-S plate finetune | LPR stage 1 - locate the plate inside a vehicle crop. |
+| fast-plate-ocr cct_s_v2 | LPR stage 2 - Latin OCR, with Thai/Arabic/Japanese fallbacks. |
+| yolov8-S pose | COCO-17 keypoints for Pose, Gestures and Body. |
+| YOLO26 fire finetune | Fire + smoke classes, verified on real fire imagery. |
+| YuNet | Face detection with two-scale far-face rescue. |
+| MediaPipe HandLandmarker | 21 hand landmarks for open palm / fist / pointing. |
+| OSNet x0.25 | Person re-identification embeddings. |
+| ESPCN x4 | Super-resolution for tiny plate crops. |
+
+Weights download themselves on first run; nothing binary lives in this
+repository.
+
+## The dashboard
+
+- **Analysis** - the live tile: pick a camera, pick one layer, watch it
+  draw. Boxes glide between backend ticks, alerts burn a red banner,
+  and a per-layer HUD reports people, vehicles, tick time and alerts.
+- **Investigation** - every saved detection as a gallery card with its
+  full frame, layer, camera and clock, plus the per-attempt plate and
+  face crops behind each read.
+- **Model information** - every weight the pipeline can load, its role,
+  size and location, with published reference metrics where the source
+  publishes them.
 
 ## Quick start
 
 ```bash
-git clone https://github.com/orarr2/Real_Time_CV_Object_Tracking_YOLO26 real-time-cv-yolo26
-cd real-time-cv-yolo26
-python -m venv .venv
-.\.venv\Scripts\activate            # Windows PowerShell
-# source .venv/bin/activate         # macOS / Linux
 pip install -r src/requirements.txt
-cd src
-python serve.py                     # opens http://localhost:8000
+jupyter notebook real_time_cv.ipynb
 ```
 
-Model weights are not shipped with the repo (see
-[Model files](#model-files)). The notebook's setup cell (section 0,
-`## 0. Setup`) verifies Python dependencies AND downloads every optional
-weight directly onto the machine running the notebook - `yolo26m.pt`
-and `yolov8s-pose.pt` come via `ultralytics` on first model load; the
-LPR + face weights are fetched by the same setup cell before that. No
-manual downloads, no separate script.
+Run all cells, type one number to pick a camera, and the dashboard
+opens at `http://localhost:8000`. Everything runs on your machine; no
+cloud, no accounts, no uploads.
 
-Alternatively:
+## How it holds up on real streets
 
-```bash
-jupyter lab real_time_cv.ipynb      # notebook at the repo root
-```
+- Every claim on screen is earned: a layer with nothing to show says so
+  instead of decorating the frame.
+- Alerts are debounced and double-confirmed - single-frame flicker
+  never pages anyone.
+- Plate reads pass a confidence floor, a length floor, per-country
+  grammar and temporal agreement before they are believed.
+- Saved crops are capped and rotated, so weeks of runtime cannot flood
+  the disk.
 
-Section 7 of the notebook binds the same dashboard on port 8000 with the
-camera you pick in the notebook's picker cell.
-
-## Prerequisites
-
-- **Python 3.10 or newer** (yt-dlp dropped 3.9 support in 2025).
-- **~1 GB free disk** for the model weights (fetched on first run, see
-  [Model files](#model-files)) plus their OpenVINO IR cache.
-- **~2 GB free RAM** while running one live analysis session; add 200-400 MB
-  per additional layer that loads its own ONNX model.
-- **Chrome, Edge or Firefox** for the dashboard (needs `hls.js` and
-  YouTube embed support).
-- **Optional GPU:** not required. On integrated CPU (Intel UHD 620 class)
-  YOLO26-m runs ~220 ms/frame via OpenVINO; a discrete GPU is strongly
-  recommended once you want more than a single live session or an
-  upgrade to `yolo26x` / `rtdetr-x`.
-
-## What the model predicts
-
-`yolo26m` is trained on COCO 80 classes; the engine keeps only the
-classes relevant for street footfall and vehicle tracking:
-
-| Group    | COCO classes kept                                           |
-| -------- | ----------------------------------------------------------- |
-| person   | `person`                                                    |
-| vehicles | `car`, `motorcycle`, `bus`, `truck`, `bicycle`              |
-| extras   | `train` (rail cameras), `dog` (optional)                    |
-
-Everything else is discarded before the layers run. Each remaining
-class gets its own box color in the overlay.
-
-## Camera catalog and video sources
-
-Cameras live in `src/app/cameras.py` as a plain Python dict. Each entry
-declares a `kind`:
-
-| `kind`         | Meaning                                                                                     |
-| -------------- | ------------------------------------------------------------------------------------------- |
-| `hls`          | Direct `.m3u8` manifest URL; consumed as-is.                                                |
-| `youtube`      | A YouTube live URL. The frontend embeds the iframe player. The backend resolves an HLS URL via `yt-dlp` for frame grabbing (may require exported cookies - see [Troubleshooting](#troubleshooting)). |
-| `skyline`      | A skylinewebcams.com page URL; resolved to a tokenised HLS URL per session.                 |
-| `webcamera24`  | A webcamera24.com page URL; resolves to the embedded tvkur / YouTube stream.                |
-| `local_file`   | Absolute path to an MP4/MKV/MOV/AVI/WEBM under `src/data/uploads/`.                         |
-
-To add a new camera, drop a dict entry into `CAMERAS`. The catalog
-endpoint (`/api/catalog`) picks it up on the next server start; no code
-change beyond the entry itself.
-
-## Analysis layers
-
-Every layer draws on the same frame the operator is watching. One layer
-runs per session; switching swaps the layer without restarting the
-stream (accumulators are preserved).
-
-| # | Layer      | What it draws                                                                    |
-| - | ---------- | -------------------------------------------------------------------------------- |
-| 1 | `paths`    | Per-track trail history plus a speed tier (slow / moving / fast).                |
-| 2 | `pose`     | COCO-17 top-down skeleton on each person crop tall enough for legible keypoints. |
-| 3 | `gestures` | Temporal arm gestures across recent frames (hand_raised, both_hands_up, wave).   |
-| 4 | `body`     | Kinematic + gesture flags per person track, incl. posture-based fall suspects.   |
-| 5 | `faces`    | Face bounding boxes only (YuNet). No identification.                             |
-| 6 | `line`     | Counting line drawn by the operator; increments in / out counters.               |
-| 7 | `loiter`   | Dwell alerts on operator-drawn polygons.                                         |
-| 8 | `parking`  | Occupancy flips (empty <-> filled) on operator-drawn polygons.                   |
-| 9 | `plates`   | Two-stage LPR (yolov11-S plate detector + fast-plate-ocr) with per-track cache.  |
-| 10 | `heat`    | 48x27 grid activity heatmap with 180 s half-life decay.                          |
-
-## Model files
-
-| File                                         | Role                                                                     | Where to get it |
-| -------------------------------------------- | ------------------------------------------------------------------------ | --------------- |
-| `yolo26m.pt`                                 | Primary detector (person + vehicles + train).                            | Auto-downloaded on first `YOLO("yolo26m.pt")` call by `ultralytics`. |
-| `src/yolo26m_openvino_model/`                | OpenVINO IR cache for `yolo26m.pt` (2-3x faster on CPU).                 | Built locally with `YOLO("yolo26m.pt").export(format="openvino")`. |
-| `yolov11s-plate.pt`                          | LPR stage 1: locate plate boxes inside a vehicle crop (Small finetune).  | [morsetechlab/yolov11-license-plate-detection](https://huggingface.co/morsetechlab/yolov11-license-plate-detection) (`license-plate-finetune-v1s.pt`). |
-| `plate_ocr_global.onnx`                      | LPR stage 2: Latin OCR (digits + A-Z, 10 slots + region head).           | [fast-plate-ocr `cct_s_v2_global`](https://github.com/ankandrew/fast-plate-ocr) (MIT). |
-| `yolov8s-pose.pt`                            | Top-down COCO-17 keypoints on person crops (Small).                      | Auto-downloaded on first `YOLO("yolov8s-pose.pt")` call by `ultralytics`. |
-| `models/FSRCNN_x4.pb`                        | 4x super-resolution applied to small plate / vehicle crops before OCR.   | [Saafke/FSRCNN Tensorflow](https://github.com/Saafke/FSRCNN_Tensorflow) - grab `FSRCNN_x4.pb` (Apache-2.0). |
-| `src/data/face_detection_yunet_2023mar.onnx` | YuNet face detector (bounding boxes only).                               | [opencv/opencv_zoo `face_detection_yunet_2023mar.onnx`](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet). |
-| `src/data/osnet_x0_25_msmt17.onnx`           | OSNet re-identification embedding (falls back to HSV histogram if absent). | [KaiyangZhou/deep-person-reid](https://github.com/KaiyangZhou/deep-person-reid) - export `osnet_x0_25` to ONNX. |
-
-Weights are **not** committed to the repository (see `.gitignore`).
-The notebook's setup cell (`real_time_cv.ipynb`, section 0) fetches
-every weight above on its first run alongside the Python dependency
-check - nothing manual, nothing shipped, everything lands on the
-machine running the notebook. The table's "Where to get
-it" column is the fallback for standalone dashboard runs
-(`python serve.py` without ever opening the notebook) or for any URL
-the notebook cell couldn't reach. Non-Latin OCR (Thai, Arabic,
-Japanese) is enabled by installing `easyocr` and setting
-`PLATE_OCR_LANGS=latin,th,ar,ja`.
-
-OSNet Re-ID ONNX is the only weight the notebook does not auto-fetch
-(no permissive public URL exists as a single file). The Re-ID layer
-falls back to an HSV colour histogram in its absence - the default
-already-working behaviour.
-
-## Notebook
-
-`real_time_cv.ipynb` at the repo root walks the same pipeline the
-dashboard uses:
-
-1. Dependency check and model load.
-2. Camera picker (list of `active_cameras()`).
-3. Single-frame check.
-4. Footfall time-series (`footfall_series`).
-5. Rolling z-score anomaly flag + peak-hour profile.
-6. Dwell / prolonged-stop analysis via `model.track()`.
-7. Re-identification with `ReidStore`.
-8. Business score (`business_score`).
-9. **Live dashboard bind on port 8000** (`bind(PORT)` + IFrame).
-10. Multi-site comparison (over the picked camera only in single-cam
-    mode).
-11. Live run summary.
-12. Accuracy calibration (10a / 10b / 10c).
-
-The notebook and the dashboard share the same detection code
-(`src/app/`); the notebook is the exploratory surface, the dashboard is
-the operator surface.
-
-## Dashboard
-
-`python serve.py` binds a local HTTP server on `http://localhost:8000`
-and opens the browser to a single-page dashboard:
-
-- **Analysis tab** - one full-width live tile with the picker on top and
-  the analyze modal on the right.
-- **Investigation tab** - saved detection samples (grid gallery).
-- **Reinforcement learning tab** - review UI (currently disabled after
-  the review-system removal; the header line still shows the last-known
-  model accuracy when a `data/reviews.json` file exists).
-
-The tile shows the live video (HLS `<video>` or YouTube iframe). When
-an analysis session is running, a canvas overlays the video and draws
-boxes / trails / heatmap cells. Boxes glide between backend ticks via
-client-side interpolation and velocity extrapolation.
-
-## Repository layout
+## Layout
 
 ```
-real-time-cv-yolo26/
-  README.md                         (this file)
-  yolo26m.pt                        primary detector
-  yolov11s-plate.pt
-  yolov8s-pose.pt
-  plate_ocr_global.onnx             Latin plate OCR
-  models/
-    FSRCNN_x4.pb                    optional 4x super-resolution
-  real_time_cv.ipynb                exploratory notebook (root)
-  src/
-    serve.py                        dashboard launcher
-    requirements.txt
-    app/                            detection + analysis engine
-      detect_core.py                model load + resolve + grab_frame
-      live_analysis.py              per-tick orchestration
-      dashboard_server.py           HTTP endpoints
-      cameras.py                    camera catalog
-      tracker.py                    BurstTracker
-      plates.py, pose.py, faces.py, gestures.py, heatmap.py,
-      behavior.py, reid.py, reid_embed.py,
-      local_producers.py, model_metrics.py, __init__.py
-      layers/                       per-layer frame drawers (D1 split)
-      yolo26m_openvino_model/       OpenVINO IR for the primary detector
-    data/
-      face_detection_yunet_2023mar.onnx
-      osnet_x0_25_msmt17.onnx
-      uploads/                      uploaded videos land here
-    web/
-      index.html, app.js
-      snapshots/                    saved detections + review crops
-    tests/                          pytest suite
-    docs/
-      PROJECT_GUIDE.md              deep-dive (English)
-      PROJECT_GUIDE_HE.md           deep-dive (Hebrew)
-      NOTEBOOK_MAIN_HE.md           notebook walkthrough (Hebrew)
+real_time_cv.ipynb          the end-to-end notebook
+src/
+  app/                      detection, tracking, layers, LPR, pose,
+                            faces, hands, fire, dashboard server
+  web/                      dashboard frontend (HTML/JS/canvas)
+media/                      the gallery above, straight from live runs
 ```
 
-## Troubleshooting
-
-**YouTube camera stuck on "stream unavailable - retrying...":** the
-backend uses `yt-dlp` to resolve the live HLS URL. YouTube's bot check
-frequently blocks non-authenticated requests. Export cookies from a
-signed-in Chrome session with the "Get cookies.txt LOCALLY" extension
-and set:
-
-```bash
-YT_COOKIES_FILE=<path/to/cookies.txt> python serve.py
-```
-
-If cookies alone still fail (this IP got fingerprinted by YouTube), use
-the screen-capture fallback described below - the iframe keeps playing
-the video and YOLO reads pixels straight off the operator's display.
-
-**YouTube iframe shows "Error 153":** the video owner disabled embed for
-that specific stream. Try a different Thailand camera or upload a local
-MP4.
-
-**Port 8000 already in use:** `python serve.py --port 8765` picks a
-different port. The notebook Section 7 hardcodes 8000; edit the `PORT`
-variable in that cell if you already have something on 8000.
-
-**Model header shows "loading..." forever:** the `data/reviews.json`
-file is missing or unreadable. The Review UI was removed with the code
-cleanup so this endpoint returns an empty state; the header falls back
-to "Model: no feedback yet".
-
-**`ImportError` in a test file:** the tests for the removed subsystems
-(`test_visual_search.py`, `test_review_queue.py`,
-`test_relabel_export.py`, `test_calibrate_conf.py` etc.) were deleted
-along with their modules. Re-run `pytest src/tests/` after a `git
-clean` to make sure no stale caches remain.
-
-## YouTube blocked by bot-check? Screen-capture fallback
-
-When YouTube returns "Sign in to confirm you're not a bot" and cookies
-alone stop working, the backend can grab pixels off the operator's
-primary display (whatever the browser tab is currently showing) instead.
-Detection then runs on those pixels exactly as if the iframe were a
-first-class stream.
-
-**Enable it:**
-
-```bash
-SCREEN_CAPTURE_FALLBACK=1 YT_COOKIES_FILE=<cookies> python serve.py
-```
-
-The notebook opts in automatically (`os.environ.setdefault('SCREEN_CAPTURE_FALLBACK','1')`
-lives in cell 4).
-
-**How it works:** `src/app/screen_capture.py` uses `mss` (DXGI Desktop
-Duplication on Windows, XShm on Linux, Quartz on macOS) with a
-`PIL.ImageGrab` fallback. `src/app/detect_core.py:_resolve_uncached`
-catches the `yt-dlp` failure and returns a `screen://primary` sentinel;
-`grab_frame` recognises the sentinel and returns the current screen
-region.
-
-**Region to capture:** point the backend at the iframe's on-screen
-rectangle so it doesn't grab your whole desktop:
-
-```bash
-curl -X POST http://localhost:8000/api/screen-capture/bbox \
-  -H "Content-Type: application/json" \
-  -d '{"x1":463,"y1":436,"x2":1438,"y2":985}'
-```
-
-The dashboard's Analyze button also POSTs this bbox automatically on
-each start (it measures the iframe's `getBoundingClientRect()` and
-multiplies by `devicePixelRatio`), so most operators don't need the curl
-call.
-
-**Operator requirement:** the Chrome window with the dashboard tab must
-be visible on the primary display during capture. If you switch to
-another window mid-analysis, subsequent frames capture whatever is on
-screen instead - the session survives (`_LAST_GOOD_FRAME` cache keeps
-inference alive) but detection stalls until the video is visible again.
+Model licenses: Ultralytics YOLO (AGPL-3.0), morsetechlab plate
+finetune, fast-plate-ocr (MIT), MediaPipe (Apache-2.0), OpenCV zoo
+YuNet (Apache-2.0), community YOLO26 fire finetune, TF-ESPCN.

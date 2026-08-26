@@ -1,17 +1,5 @@
 # Project guide - Real-Time CV Object Tracking (YOLO26)
 
-> **Changes in the 2026-08-23 session** (full decision log in
-> `docs/AUDIT_2026-08-23.md`): ~1,900 lines of dead code removed (dead server
-> endpoints, burst-analytics chain, blur path, live_samples /
-> anomaly_crops / calibrate_conf); plate detector upgraded to
-> yolov11-S + OCR to fast-plate-ocr `cct_s_v2` + pose to `yolov8s-pose`;
-> body-anomaly gates hardened (ratio 8, 10-sample/10-s bbox window,
-> 2-tick debounce, 60-px both-fast fighting rule); fall detection
-> folded into the Body layer; per-country plate grammar; hot-trail decay +
-> 15-s replay ring; PDT clock-sync probe implemented; per-layer drawers
-> split into `app/layers/draw.py`. Thresholds reference:
-> `src/docs/DECISION_THRESHOLDS_HE.md`.
-
 
 Deep-dive companion to `README.md` at the repo root. This file covers
 the actual runtime pipeline, every tunable configuration knob, the

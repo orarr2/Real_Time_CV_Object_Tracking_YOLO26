@@ -1191,8 +1191,8 @@ async function openSavedDetections() {
       "border-top:1px solid #1e293b;padding:8px 0";
     const t = new Date(it.ts * 1000);
     row.innerHTML = `
-      <a href="${it.image}" target="_blank" rel="noopener">
-        <img src="${it.image}" alt="" style="height:64px;border-radius:6px"></a>
+      <a href="${it.image}?v=${it.id || ''}" target="_blank" rel="noopener">
+        <img src="${it.image}?v=${it.id || ''}" alt="" style="height:64px;border-radius:6px"></a>
       <div style="min-width:0">
         <div style="color:#e2e8f0;font-size:13px">${escapeHtml(it.text)}</div>
         <div style="color:#64748b;font-size:11px">${escapeHtml(it.cam_name || it.cam)}
@@ -1239,7 +1239,7 @@ async function renderGallery() {
         background:rgba(2,6,23,.72);color:#fca5a5;font-size:14px;
         cursor:pointer">×</button>
       <a href="#" data-pipeline-expand="${idSafe}">
-        <img src="${it.image}" alt="" loading="lazy"
+        <img src="${it.image}?v=${it.id || ''}" alt="" loading="eager" decoding="async"
              style="width:100%;height:96px;object-fit:cover;display:block"></a>
       <figcaption style="padding:5px 6px">
         <div style="font-size:10px;color:#e7e9ee;white-space:nowrap;
@@ -1350,7 +1350,7 @@ function openPipelineModal(it) {
   img.onload = () => paintStages(img, stageEls, enhanceInput.checked);
   enhanceInput.addEventListener("change",
     () => paintStages(img, stageEls, enhanceInput.checked));
-  img.src = it.image;
+  img.src = `${it.image}?v=${it.id || ""}`;
   // 2026-08-23 (C2): try to fetch the REAL per-attempt plate crops
   // saved during the OCR pass. When found, overlay panels B/C/D with
   // actual plate crops (with the OCR text baked in as a caption bar).
@@ -1854,13 +1854,20 @@ function _syncAnalysisBgVisibility(st) {
     if (want === "block") _refreshAnalysisBg(a);
   }
   // 2026-08-23 (B3): stream-stalled ribbon. If no new analysis payload
-  // in > 3s (backend cache is looping on _LAST_GOOD_FRAME, or the
-  // screen-capture branch is silently reusing the same pixels), show
-  // an obvious red bar over the video so operators do not stare at a
+  // arrives for far longer than the pipeline's own cadence, show an
+  // obvious red bar over the video so operators do not stare at a
   // "live" chip while the pipeline is dead.
-  const STALE_MS = 3000;
+  // 2026-08-26 fix: the threshold used to be a FIXED 3s, so any layer
+  // whose honest tick ran slower than 3s (pose at night sits at ~6s)
+  // flashed "stalled" between every tick - constant false alarms, the
+  // operator's exact complaint. Now the bar is ADAPTIVE: it fires only
+  // past 3x the observed tick interval (learned from the last payload
+  // gaps, min 10s), so a slow-but-healthy layer stays quiet and a
+  // truly dead pipeline still turns red within seconds.
+  const tickMs = a._tickEmaMs || 4000;
+  const staleMs = Math.max(10000, tickMs * 3);
   const fresh = a._lastFreshMs || 0;
-  const stale = fresh > 0 && (Date.now() - fresh) > STALE_MS;
+  const stale = fresh > 0 && (Date.now() - fresh) > staleMs;
   let ribbon = st.videoWrap.querySelector(".analysis-stall-ribbon");
   if (stale) {
     if (!ribbon) {
@@ -1914,7 +1921,18 @@ async function pollAnalysisFrame(st) {
         // update; a client-side check below uses this to show a
         // "Stream stalled" ribbon when the analysis loop stops
         // producing new frames.
-        a._lastFreshMs = Date.now();
+        // Learn the pipeline's real cadence for the adaptive stall
+        // threshold (2026-08-26): EMA of wall-clock gaps between fresh
+        // payloads, in ms.
+        const nowMs = Date.now();
+        if (a._lastFreshMs) {
+          const gapMs = nowMs - a._lastFreshMs;
+          if (gapMs > 200 && gapMs < 60000) {
+            a._tickEmaMs = a._tickEmaMs
+              ? 0.7 * a._tickEmaMs + 0.3 * gapMs : gapMs;
+          }
+        }
+        a._lastFreshMs = nowMs;
         const prevTick = a.tickBuf[a.tickBuf.length - 1];
         if (prevTick) {
           const gap = (d.at || 0) - (prevTick.at || 0);
@@ -2307,18 +2325,33 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
     // above already draw the pieces the operator cares about
     // (crossings/pills, occupancy polygons, fire hits).
     if (d.layer === "line" || d.layer === "parking" || d.layer === "fire") continue;
-    const isPose = (d.layer === "pose" || d.layer === "gestures");
-    if (isPose && b.cls !== "person") continue;
-    if (d.layer === "body" && !b.flag) continue;
-    if (d.layer === "gestures" && !b.gestures && !b.kps) continue;
+    const personLayer = (d.layer === "pose" || d.layer === "gestures"
+                         || d.layer === "body");
+    if (personLayer && b.cls !== "person") continue;
+    // Gestures stays honest like the backend drawer: only people with
+    // an ACTIVE gesture (arm pose or hand-landmark verdict) render.
+    if (d.layer === "gestures" && !b.gestures && !b.hand_gesture) continue;
     if (d.layer === "plates" && b.cls === "person") continue;
     const ox = (b.vx || 0) * dtExtra, oy = (b.vy || 0) * dtExtra;
     const x = (b.x1 + ox) * sx, y = (b.y1 + oy) * sy;
     const w = (b.x2 - b.x1) * sx, h = (b.y2 - b.y1) * sy;
     if (x + w < 0 || y + h < 0 || x > cw || y > ch) continue;
+    // 2026-08-24 design: person layers + paths use the stable per-track
+    // color so each object pairs with its trail and (coming) side card;
+    // other layers keep their semantic colors.
     let color = b.cls === "person"
       ? "rgba(74,222,128,0.95)" : "rgba(251,146,60,0.95)";
-    let label = `${b.cls} ${Math.round((b.conf || 0) * 100)}%`;
+    if ((personLayer || d.layer === "paths") && b.tid != null) {
+      color = _trackColorJs(b.tid);
+    }
+    // The #id lives on the side card by design - pose/body boxes carry
+    // no in-video text unless a flag needs words.
+    let label = "";
+    if (d.layer === "paths") {
+      label = `#${b.tid} ${b.cls}`;
+    } else if (!personLayer) {
+      label = `${b.cls} ${Math.round((b.conf || 0) * 100)}%`;
+    }
     if (d.layer === "paths" && b.tier) {
       // Speed number next to the tier chip (2026-08-16). BL/s is
       // perspective-honest (body-lengths per second); the raw px/s is
@@ -2329,8 +2362,16 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
         if (b.speed_pxs) label += ` (${b.speed_pxs} px/s)`;
       }
     }
-    if (d.layer === "gestures" && b.gestures)
-      label = `#${b.tid} ${b.gestures.join("+")}`;
+    if (d.layer === "gestures" && (b.gestures || b.hand_gesture)) {
+      const parts = [...(b.gestures || [])];
+      if (b.hand_gesture) {
+        const w = ({ open_palm: "OPEN PALM", fist: "FIST",
+                     pointing: "POINTING" })[b.hand_gesture]
+                  || b.hand_gesture;
+        parts.push(b.hand_dir ? `${w} ${b.hand_dir}` : w);
+      }
+      label = `#${b.tid} ${parts.join("+")}`;
+    }
     if (d.layer === "body" && b.flag) {
       color = b.alert ? "rgba(239,68,68,0.95)" : "rgba(234,140,8,0.95)";
       const flagTxt = String(b.flag).toUpperCase().replace(/_/g, " ");
@@ -2368,11 +2409,13 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
     ctx.strokeRect(x, y, w, h);
     ctx.setLineDash([]);
     if (b.kps) _drawSkeleton(ctx, b.kps, sx, sy, ox, oy);
-    const tw = ctx.measureText(label).width + 8;
-    ctx.fillStyle = "rgba(15,23,42,0.85)";
-    ctx.fillRect(x, Math.max(0, y - 16), tw, 16);
-    ctx.fillStyle = "#f8fafc";
-    ctx.fillText(label, x + 4, Math.max(12, y - 4));
+    if (label) {
+      const tw = ctx.measureText(label).width + 8;
+      ctx.fillStyle = "rgba(15,23,42,0.85)";
+      ctx.fillRect(x, Math.max(0, y - 16), tw, 16);
+      ctx.fillStyle = "#f8fafc";
+      ctx.fillText(label, x + 4, Math.max(12, y - 4));
+    }
   }
   if (boxAlpha < 1) ctx.globalAlpha = 1;
 
@@ -2402,67 +2445,99 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
   }
 }
 
-// Skeleton in four region colors (2026-08-16, matches app/pose.py's
-// _BONE_GROUPS): head/face cluster yellow (nose+eyes+ears), arms cyan
-// (shoulders-elbows-wrists), torso trunk green, legs magenta. Each
-// person carries four clearly separated colors at once.
+// Skeleton in the SIX-region v1 palette with left/right limb
+// separation (operator pick 2026-08-24, matches app/pose.py's
+// _BONE_GROUPS exactly): golden head, violet torso, green right arm vs
+// azure left arm, orange-red right leg vs cyan left leg. A dark halo
+// pass under the color pass keeps limbs readable on neon backgrounds,
+// and joints render as ringed dots - same look as the backend JPEGs.
 const _SKELETON_GROUPS = [
-  // head/face
-  { color: "rgba(250,204,21,0.95)",
+  // head/face cluster
+  { color: "rgba(255,215,0,0.95)",
     edges: [[0, 1], [0, 2], [1, 3], [2, 4]] },
-  // arms
-  { color: "rgba(34,211,238,0.95)",
-    edges: [[5, 7], [7, 9], [6, 8], [8, 10]] },
   // torso trunk (incl. neck to shoulders)
-  { color: "rgba(74,222,128,0.95)",
+  { color: "rgba(168,66,230,0.95)",
     edges: [[0, 5], [0, 6], [5, 6], [5, 11], [6, 12], [11, 12]] },
-  // legs
-  { color: "rgba(232,121,249,0.95)",
-    edges: [[11, 13], [13, 15], [12, 14], [14, 16]] },
+  // right arm
+  { color: "rgba(80,220,80,0.95)",
+    edges: [[6, 8], [8, 10]] },
+  // left arm
+  { color: "rgba(0,170,255,0.95)",
+    edges: [[5, 7], [7, 9]] },
+  // right leg
+  { color: "rgba(255,100,60,0.95)",
+    edges: [[12, 14], [14, 16]] },
+  // left leg
+  { color: "rgba(0,255,255,0.95)",
+    edges: [[11, 13], [13, 15]] },
 ];
-// Keypoint index -> region color for the joint dots (kept in sync with
-// _SKELETON_GROUPS above; head kps 0-4, arms 5-10, legs 11-16).
+// Keypoint index -> color for the joint dots (head 0-4 gold; shoulder/
+// hip anchors violet; elbows/wrists and knees/ankles per side).
 const _KP_COLOR = {
-  0: "rgba(250,204,21,0.95)", 1: "rgba(250,204,21,0.95)",
-  2: "rgba(250,204,21,0.95)", 3: "rgba(250,204,21,0.95)",
-  4: "rgba(250,204,21,0.95)",
-  5: "rgba(34,211,238,0.95)", 6: "rgba(34,211,238,0.95)",
-  7: "rgba(34,211,238,0.95)", 8: "rgba(34,211,238,0.95)",
-  9: "rgba(34,211,238,0.95)", 10: "rgba(34,211,238,0.95)",
-  11: "rgba(232,121,249,0.95)", 12: "rgba(232,121,249,0.95)",
-  13: "rgba(232,121,249,0.95)", 14: "rgba(232,121,249,0.95)",
-  15: "rgba(232,121,249,0.95)", 16: "rgba(232,121,249,0.95)",
+  0: "rgba(255,215,0,0.95)", 1: "rgba(255,215,0,0.95)",
+  2: "rgba(255,215,0,0.95)", 3: "rgba(255,215,0,0.95)",
+  4: "rgba(255,215,0,0.95)",
+  5: "rgba(168,66,230,0.95)", 6: "rgba(168,66,230,0.95)",
+  7: "rgba(0,170,255,0.95)", 8: "rgba(80,220,80,0.95)",
+  9: "rgba(0,170,255,0.95)", 10: "rgba(80,220,80,0.95)",
+  11: "rgba(168,66,230,0.95)", 12: "rgba(168,66,230,0.95)",
+  13: "rgba(0,255,255,0.95)", 14: "rgba(255,100,60,0.95)",
+  15: "rgba(0,255,255,0.95)", 16: "rgba(255,100,60,0.95)",
 };
 
 function _drawSkeleton(ctx, kps, sx, sy, ox, oy) {
-  ctx.lineWidth = 2;
-  for (const grp of _SKELETON_GROUPS) {
-    ctx.strokeStyle = grp.color;
-    for (const [a, b] of grp.edges) {
-      const p = kps[a], q = kps[b];
-      if (!p || !q || p[2] < 0.3 || q[2] < 0.3) continue;
-      ctx.beginPath();
-      ctx.moveTo((p[0] + ox) * sx, (p[1] + oy) * sy);
-      ctx.lineTo((q[0] + ox) * sx, (q[1] + oy) * sy);
-      ctx.stroke();
+  // Halo pass first, then color - limbs stay legible on any backdrop.
+  for (const pass of [{ w: 4.5, c: "rgba(20,20,20,0.85)" },
+                      { w: 2.5, c: null }]) {
+    ctx.lineWidth = pass.w;
+    for (const grp of _SKELETON_GROUPS) {
+      ctx.strokeStyle = pass.c || grp.color;
+      for (const [a, b] of grp.edges) {
+        const p = kps[a], q = kps[b];
+        if (!p || !q || p[2] < 0.3 || q[2] < 0.3) continue;
+        ctx.beginPath();
+        ctx.moveTo((p[0] + ox) * sx, (p[1] + oy) * sy);
+        ctx.lineTo((q[0] + ox) * sx, (q[1] + oy) * sy);
+        ctx.stroke();
+      }
     }
   }
+  ctx.lineWidth = 1;
   for (let i = 0; i < kps.length; i++) {
     const k = kps[i];
     if (!k || k[2] < 0.3) continue;
+    const px = (k[0] + ox) * sx, py = (k[1] + oy) * sy;
     ctx.fillStyle = _KP_COLOR[i] || "rgba(219,234,254,0.95)";
     ctx.beginPath();
-    ctx.arc((k[0] + ox) * sx, (k[1] + oy) * sy, 2.5, 0, Math.PI * 2);
+    ctx.arc(px, py, 3.2, 0, Math.PI * 2);
     ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.9)";
+    ctx.beginPath();
+    ctx.arc(px, py, 4, 0, Math.PI * 2);
+    ctx.stroke();
   }
 }
 
-const _TRAIL_PALETTE = [
-  "rgba(96,165,250,0.9)", "rgba(74,222,128,0.9)", "rgba(251,146,60,0.9)",
-  "rgba(232,121,249,0.9)", "rgba(250,204,21,0.9)", "rgba(45,212,191,0.9)",
+// Stable per-track colors (2026-08-24) - the SAME twelve hues as
+// TRACK_PALETTE in app/layers/draw.py (converted BGR->RGB), so the live
+// canvas, the backend JPEGs and the side cards all pair one object with
+// one color.
+const _TRACK_PALETTE_JS = [
+  "rgba(255,200,80,0.95)",  "rgba(245,90,90,0.95)",
+  "rgba(70,160,220,0.95)",  "rgba(120,210,120,0.95)",
+  "rgba(200,100,230,0.95)", "rgba(220,220,90,0.95)",
+  "rgba(120,200,200,0.95)", "rgba(245,120,140,0.95)",
+  "rgba(140,190,245,0.95)", "rgba(230,160,100,0.95)",
+  "rgba(170,140,200,0.95)", "rgba(170,220,150,0.95)",
 ];
+function _trackColorJs(tid) {
+  const i = Math.abs(parseInt(tid, 10) || 0) % _TRACK_PALETTE_JS.length;
+  return _TRACK_PALETTE_JS[i];
+}
+
 function _trailColor(tid) {
-  return _TRAIL_PALETTE[Math.abs(tid) % _TRAIL_PALETTE.length];
+  // Trails share the track color so box + trail + card pair by hue.
+  return _trackColorJs(tid);
 }
 
 async function _refreshAnalysisBg(a) {
