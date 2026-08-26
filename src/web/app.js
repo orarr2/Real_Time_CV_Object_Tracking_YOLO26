@@ -434,6 +434,254 @@ function buildSingleTile(cam) {
   document.addEventListener("webkitfullscreenchange", onFsChange);
 })();
 
+// ---------- Side-card dock (operator-approved layer design) -------------
+// The player is flanked by two rails OUTSIDE the video; every tracked
+// object gets a small transparent card on the rail nearest to it (1px
+// border + accent strip in its unique track color) carrying #id, the
+// per-layer status line, confidence and time in frame. Pose / Body /
+// Gestures cards also stretch a thin leader line in the same color from
+// the card to their object inside the frame; Paths and Faces stay
+// leader-free because their frames already carry lines of their own. In
+// Cinema the rails float transparently over the frame edges - same
+// cards, no side space needed.
+const _RAIL_TITLES = {
+  pose: "POSE & SKELETON", body: "BODY ANOMALIES",
+  gestures: "HAND GESTURES", faces: "FACES", paths: "PATHS & SPEEDS",
+  heat: "HEAT", line: "LINE CROSSING", fire: "FIRE",
+  parking: "PARKING", plates: "LICENSE PLATES",
+};
+const _LEADER_LAYERS = { pose: 1, body: 1, gestures: 1 };
+const _HAND_WORDS_JS = { open_palm: "OPEN PALM", fist: "FIST",
+                         pointing: "POINTING" };
+(function installSideDock() {
+  const style = document.createElement("style");
+  style.textContent = `
+    .an-stage { position: relative; display: flex; align-items: stretch;
+      justify-content: center; gap: 4px;
+      --an-rail-w: clamp(170px, 15vw, 258px); }
+    .an-rail { flex: 0 0 var(--an-rail-w); position: relative;
+      padding: 2px 8px 8px; overflow: hidden; min-width: 0; }
+    .an-stage .video-wrap { flex: 0 0 auto; height: auto !important;
+      aspect-ratio: 16 / 9;
+      width: min(calc(100% - 2 * var(--an-rail-w) - 8px),
+                 calc((100dvh - 210px) * 16 / 9)); }
+    .an-rail-title { color: #e6e6e6;
+      font: 700 13px/1.3 ui-monospace, Consolas, monospace;
+      letter-spacing: 0.07em; padding: 4px 2px 7px;
+      border-bottom: 1px solid #334155; margin-bottom: 10px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .an-cards { overflow: hidden; }
+    .an-card { position: relative; border: 1px solid var(--an-col, #94a3b8);
+      border-radius: 4px; background: rgba(44, 60, 72, 0.42);
+      margin: 0 0 10px; padding: 7px 10px 7px 15px;
+      font: 12px/1.55 ui-monospace, Consolas, monospace; color: #c3beb9;
+      overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .an-card::before { content: ""; position: absolute; left: 0; top: 0;
+      bottom: 0; width: 5px; background: var(--an-col, #94a3b8); }
+    .an-card .l1 { color: #f0f0f0; font-weight: 700; font-size: 12.5px; }
+    .an-card .l2 { color: #82d278; }
+    .an-card .l2.mut { color: #a09b96; }
+    .an-card .l2.hot { color: #ffc850; }
+    .an-card .l2.alert { color: #f87171; }
+    .an-leaders { position: absolute; inset: 0; pointer-events: none;
+      z-index: 5; overflow: visible; width: 100%; height: 100%; }
+    .an-stop-chip { position: absolute; top: 40px; right: 16px; z-index: 6;
+      background: rgba(200, 60, 60, 0.92); color: #fff; border: 0;
+      border-radius: 4px; padding: 6px 16px; cursor: pointer;
+      font: 600 13px system-ui, sans-serif; pointer-events: auto;
+      box-shadow: 0 1px 6px rgba(0, 0, 0, 0.45); }
+    .an-stop-chip:hover { background: rgba(220, 50, 50, 0.98); }
+    body.cinema-active #tile-single .an-stage {
+      position: absolute !important; inset: 0 !important;
+      display: block !important; }
+    body.cinema-active .an-rail { position: fixed; top: 0; bottom: 96px;
+      width: var(--an-rail-w, 220px); z-index: 55; padding-top: 44px;
+      background: transparent; }
+    body.cinema-active .an-rail-left { left: 0; }
+    body.cinema-active .an-rail-right { right: 0; }
+    body.cinema-active .an-leaders { position: fixed;
+      inset: 0 0 96px 0; z-index: 54; }
+    body.cinema-active .an-stop-chip { top: 48px; }
+  `;
+  document.head.appendChild(style);
+})();
+
+function _fmtInFrame(sec) {
+  const s = Math.max(0, Math.round(Number(sec) || 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+// Build the card list for one payload: {key, cx, cy, color, l1, l2,
+// l2cls, l3, l4, tid}. Which objects get cards - and what the status
+// line says - follows the approved per-layer spec exactly.
+function _sideCardsFor(d) {
+  const layer = d.layer;
+  const out = [];
+  if (layer === "faces") {
+    for (const f of d.faces || []) {
+      out.push({
+        key: `f${f.n}`, cx: (f.x1 + f.x2) / 2, cy: f.y1,
+        color: "rgb(255,165,0)",
+        l1: `FACE ${f.n != null ? f.n : ""}`.trim(),
+        l2: "detected", l2cls: "",
+        l3: `conf ${(f.conf || 0).toFixed(2)}`, l4: "", tid: null,
+      });
+    }
+    return out;
+  }
+  if (layer === "heat" || layer === "line" || layer === "fire"
+      || layer === "parking") {
+    return out;   // frame-level layers: rails carry the title only
+  }
+  for (const b of d.boxes || []) {
+    const base = {
+      key: `t${b.tid}`, cx: (b.x1 + b.x2) / 2, cy: b.y1,
+      color: _trackColorJs(b.tid), tid: b.tid,
+      l3: `conf ${(b.conf || 0).toFixed(2)}`,
+      l4: b.age != null ? `in frame ${_fmtInFrame(b.age)}` : "",
+    };
+    if (layer === "pose" || layer === "body" || layer === "gestures") {
+      if (b.cls !== "person") continue;
+      let l2, l2cls = "";
+      if (layer === "body" && b.flag) {
+        l2 = String(b.flag).toUpperCase().replace(/_/g, " ");
+        l2cls = b.alert ? "alert" : "hot";
+      } else if (layer === "gestures") {
+        const parts = [...(b.gestures || [])];
+        if (b.hand_gesture) {
+          const w = _HAND_WORDS_JS[b.hand_gesture] || b.hand_gesture;
+          parts.push(b.hand_dir ? `${w} ${b.hand_dir}` : w);
+        }
+        if (parts.length) { l2 = parts.join("+"); l2cls = "hot"; }
+        else { l2 = "no gesture"; l2cls = "mut"; }
+      } else if (b.kps) {
+        l2 = b.activity ? `SKELETON - ${b.activity}` : "SKELETON";
+      } else if (layer === "body") {
+        l2 = "NORMAL";
+      } else {
+        l2 = "too far for skeleton"; l2cls = "mut";
+      }
+      out.push(Object.assign(base,
+        { l1: `#${b.tid}  PERSON`, l2, l2cls }));
+    } else if (layer === "paths") {
+      const npts = (b.trail || []).length;
+      out.push(Object.assign(base, {
+        l1: `#${b.tid}  ${String(b.cls || "").toUpperCase()}`,
+        l2: `trail ${npts} pts`, l2cls: "",
+      }));
+    } else if (layer === "plates") {
+      if (!{ car: 1, truck: 1, bus: 1, motorcycle: 1,
+             bicycle: 1 }[b.cls]) continue;
+      const got = b.plate;
+      out.push(Object.assign(base, {
+        l1: `#${b.tid}  ${String(b.cls || "").toUpperCase()}`,
+        l2: got || "no read yet", l2cls: got ? "" : "mut",
+      }));
+    }
+  }
+  return out;
+}
+
+// Re-render both rails from a fresh payload. Cards go to the rail
+// nearest their object (left half of the frame -> left rail), sorted
+// top-to-bottom, capped to what the rail's height can hold.
+function _updateSideCards(st, a, d) {
+  if (!a || !a.railL || !a.railR) return;
+  const holderL = a.railL.querySelector(".an-cards");
+  const holderR = a.railR.querySelector(".an-cards");
+  if (!holderL || !holderR) return;
+  if (a.layer && d.layer && d.layer !== a.layer) {
+    holderL.replaceChildren(); holderR.replaceChildren();
+    a._cardIndex = [];
+    return;
+  }
+  const fw = Math.max(1, Number(d.frame_w) || 1);
+  const cards = _sideCardsFor(d).sort((p, q) => (p.cy || 0) - (q.cy || 0));
+  const cap = Math.max(1,
+    Math.floor(((a.railL.clientHeight || 400) - 44) / 102));
+  const left = cards.filter((c) => c.cx < fw / 2).slice(0, cap);
+  const right = cards.filter((c) => c.cx >= fw / 2).slice(0, cap);
+  const html = (c) =>
+    `<div class="an-card" style="--an-col:${c.color}">
+       <div class="l1">${escapeHtml(c.l1)}</div>
+       <div class="l2 ${c.l2cls || ""}">${escapeHtml(c.l2 || "")}</div>
+       ${c.l3 ? `<div class="l3">${escapeHtml(c.l3)}</div>` : ""}
+       ${c.l4 ? `<div class="l4">${escapeHtml(c.l4)}</div>` : ""}
+     </div>`;
+  holderL.innerHTML = left.map(html).join("");
+  holderR.innerHTML = right.map(html).join("");
+  a._cardIndex = _LEADER_LAYERS[d.layer]
+    ? Array.from(holderL.children)
+        .map((el, i) => ({ el, tid: left[i].tid, side: "L" }))
+        .concat(Array.from(holderR.children)
+          .map((el, i) => ({ el, tid: right[i].tid, side: "R" })))
+        .filter((e) => e.tid != null)
+    : [];
+}
+
+// Thin leader lines card -> object, refreshed every draw pass so they
+// glide with the interpolated boxes. Pose / Body / Gestures only.
+function _updateLeaders(a, d) {
+  const svg = a && a.leaders;
+  if (!svg) return;
+  const idx = a._cardIndex || [];
+  if (!idx.length || !_LEADER_LAYERS[d.layer]) {
+    if (svg.childElementCount) svg.replaceChildren();
+    svg._nodes = null;
+    return;
+  }
+  const ref = (a.canvas && a.canvas.style.display !== "none")
+    ? a.canvas : a.bg;
+  if (!ref) return;
+  const svgR = svg.getBoundingClientRect();
+  const cvR = ref.getBoundingClientRect();
+  if (!svgR.width || !cvR.width) return;
+  const fw = Math.max(1, Number(d.frame_w) || 1);
+  const fh = Math.max(1, Number(d.frame_h) || 1);
+  const byTid = new Map();
+  for (const b of d.boxes || []) {
+    if (b.tid != null) byTid.set(b.tid, b);
+  }
+  const NS = "http://www.w3.org/2000/svg";
+  if (!svg._nodes) svg._nodes = new Map();
+  const seen = new Set();
+  for (const e of idx) {
+    const b = byTid.get(e.tid);
+    if (!b) continue;
+    const cardR = e.el.getBoundingClientRect();
+    if (!cardR.width) continue;
+    const x1 = (e.side === "L" ? cardR.right : cardR.left) - svgR.left;
+    const y1 = cardR.top + cardR.height / 2 - svgR.top;
+    const x2 = cvR.left - svgR.left
+      + ((b.x1 + b.x2) / 2) * (cvR.width / fw);
+    const y2 = cvR.top - svgR.top + (b.y1 + 6) * (cvR.height / fh);
+    let node = svg._nodes.get(e.tid);
+    if (!node) {
+      const line = document.createElementNS(NS, "line");
+      line.setAttribute("stroke-width", "1.2");
+      line.setAttribute("opacity", "0.9");
+      const dot = document.createElementNS(NS, "circle");
+      dot.setAttribute("r", "3");
+      svg.appendChild(line); svg.appendChild(dot);
+      node = { line, dot };
+      svg._nodes.set(e.tid, node);
+    }
+    const col = _trackColorJs(e.tid);
+    node.line.setAttribute("x1", x1); node.line.setAttribute("y1", y1);
+    node.line.setAttribute("x2", x2); node.line.setAttribute("y2", y2);
+    node.line.setAttribute("stroke", col);
+    node.dot.setAttribute("cx", x2); node.dot.setAttribute("cy", y2);
+    node.dot.setAttribute("fill", col);
+    seen.add(e.tid);
+  }
+  for (const [tid, node] of svg._nodes) {
+    if (!seen.has(tid)) {
+      node.line.remove(); node.dot.remove();
+      svg._nodes.delete(tid);
+    }
+  }
+}
+
 function toggleCinemaMode(st, force) {
   const active = force !== undefined
     ? force
@@ -523,10 +771,12 @@ document.addEventListener("fullscreenchange", () => {
   setTimeout(() => updateScCaptureBbox(null), 500);
 });
 
-// Populate the cinema strip with plate crops. Live LPR crops come from
-// /api/analysis/plate-crops (each row carries `url`); if none exist yet
-// fall back to plate rows in the saved-events gallery, whose rows carry
-// `image` (NOT url/file/path - reading only the latter left the strip
+// Populate the cinema strip PER LAYER (operator 2026-08-24: running a
+// faces analysis must fill the strip with FACE crops, not leftover
+// plates - and so on for every layer). plates -> live LPR crops,
+// faces -> the face-crop audit trail, anything else -> that layer's own
+// rows in the saved-events gallery. Saved-gallery rows carry `image`
+// (NOT url/file/path - reading only the latter left the strip
 // permanently empty in cinema, reported by the operator 2026-08-24).
 // Runs whenever cinema is active (once every 3 s) so a fresh crop lands
 // in the strip within a tick.
@@ -534,32 +784,65 @@ setInterval(async () => {
   const strip = window.__cinemaStrip;
   if (!strip || !document.body.classList.contains("cinema-active")) return;
   try {
-    let rows = [];
     const cam = SINGLE_CAM_ID;
-    if (cam) {
-      const rc = await fetch(
-        `/api/analysis/plate-crops?cam=${encodeURIComponent(cam)}`,
-        { cache: "no-store" });
-      if (rc.ok) rows = ((await rc.json()).items || []);
-    }
-    if (!rows.length) {
+    const st = cam ? tileState[cam] : null;
+    const layer = (st && st.analysis)
+      ? (st.analysis.actualLayer || st.analysis.layer) : "plates";
+    let rows = [];
+    let label;
+    if (layer === "plates") {
+      label = "SAVED PLATE CROPS";
+      if (cam) {
+        const rc = await fetch(
+          `/api/analysis/plate-crops?cam=${encodeURIComponent(cam)}`,
+          { cache: "no-store" });
+        if (rc.ok) rows = ((await rc.json()).items || []);
+      }
+      if (!rows.length) {
+        const r = await fetch("/api/analysis/saved", { cache: "no-store" });
+        if (r.ok) {
+          const j = await r.json();
+          rows = (j.items || j.saved || []).filter(x =>
+            (x.layer === "plates") || /plate/i.test(x.file || x.name || ""));
+        }
+      }
+    } else if (layer === "faces") {
+      label = "SAVED FACE CROPS";
+      if (cam) {
+        const rc = await fetch(
+          `/api/analysis/face-crops?cam=${encodeURIComponent(cam)}`,
+          { cache: "no-store" });
+        if (rc.ok) rows = ((await rc.json()).items || []);
+      }
+    } else {
+      label = `SAVED ${String(layer).toUpperCase()} DETECTIONS`;
       const r = await fetch("/api/analysis/saved", { cache: "no-store" });
-      if (!r.ok) return;
-      const j = await r.json();
-      rows = (j.items || j.saved || []).filter(x =>
-        (x.layer === "plates") || /plate/i.test(x.file || x.name || ""));
+      if (r.ok) {
+        const j = await r.json();
+        rows = (j.items || j.saved || []).filter(x => x.layer === layer);
+      }
     }
-    if (!rows.length) return;
-    const label = strip.querySelector(".lbl");
+    const labelEl = strip.querySelector(".lbl") ||
+      Object.assign(document.createElement("span"), { className: "lbl" });
+    labelEl.textContent = label;
     strip.innerHTML = "";
-    if (label) strip.appendChild(label);
+    strip.appendChild(labelEl);
+    if (!rows.length) {
+      const empty = document.createElement("span");
+      empty.className = "empty";
+      empty.textContent = `no ${layer} saves yet - they land here as `
+        + "the layer produces them";
+      strip.appendChild(empty);
+      return;
+    }
     for (const row of rows.slice(0, 12)) {
       const src = row.url || row.file || row.path || row.image;
       if (!src) continue;
       const img = document.createElement("img");
       img.src = src.startsWith("/") ? src : "/" + src;
-      img.alt = row.plate || row.text || "plate";
-      img.title = `${row.plate || row.text || "unread"} · ${row.ts || row.at || ""}`;
+      img.alt = row.plate || row.text || layer;
+      img.title = `${row.plate || row.text || row.kind || layer} · `
+        + `${row.ts || row.at || ""}`;
       strip.appendChild(img);
     }
   } catch (_e) { /* keep last known strip on transient errors */ }
@@ -876,6 +1159,21 @@ function beginTileAnalysis(st, cam, layer) {
       lb.style.display = DRAWABLE_LAYERS[layer] ? "" : "none";
       if (DRAWABLE_LAYERS[layer]) lb.textContent = DRAWABLE_LAYERS[layer];
     }
+    // Rails follow the layer switch: new title, cards cleared until the
+    // first payload of the new layer lands.
+    for (const rail of [st.analysis.railL, st.analysis.railR]) {
+      if (!rail) continue;
+      const t = rail.querySelector(".an-rail-title");
+      if (t) t.textContent =
+        _RAIL_TITLES[layer] || String(layer || "").toUpperCase();
+      const c = rail.querySelector(".an-cards");
+      if (c) c.replaceChildren();
+    }
+    st.analysis._cardIndex = [];
+    if (st.analysis.leaders) {
+      st.analysis.leaders.replaceChildren();
+      st.analysis.leaders._nodes = null;
+    }
     return;
   }
   st._overlayWasHidden = st.overlay.style.display === "none";
@@ -953,14 +1251,9 @@ function beginTileAnalysis(st, cam, layer) {
        background:#2563eb;color:#f8fafc;border:0;border-radius:6px;
        cursor:pointer;font-size:12.5px;font-weight:600;
        display:${DRAWABLE_LAYERS[layer] ? "" : "none"}">
-       ${DRAWABLE_LAYERS[layer] || "Draw"}</button>
-    <button class="analysis-stop" style="padding:6px 14px;
-       background:#dc2626;color:#f8fafc;border:0;border-radius:6px;
-       cursor:pointer;font-size:12.5px;font-weight:600">Stop</button>`;
+       ${DRAWABLE_LAYERS[layer] || "Draw"}</button>`;
   st.videoWrap.insertAdjacentElement("beforebegin", bar);
   st.analysisBar = bar;
-  bar.querySelector(".analysis-stop").addEventListener("click",
-    () => stopTileAnalysis(st));
   bar.querySelector(".analysis-drawline").addEventListener("click", () => {
     const snap =
       `/api/analysis/frame?cam=${encodeURIComponent(cam)}&_=${Date.now()}`;
@@ -968,10 +1261,38 @@ function beginTileAnalysis(st, cam, layer) {
     if (lay === "line") window.openLineEditor(cam, snap);
     else openZoneEditor(cam, lay, snap);
   });
+  // Stop lives INSIDE the player (approved design: the red chip in the
+  // frame's top-right corner, out of the side rails' way).
+  const stopChip = document.createElement("button");
+  stopChip.className = "an-stop-chip";
+  stopChip.textContent = "Stop";
+  stopChip.addEventListener("click", () => stopTileAnalysis(st));
+  st.videoWrap.appendChild(stopChip);
+  // Side rails flank the player; the leaders SVG spans rails + player
+  // so a card's line can cross from outside the video to its object.
+  const stage = document.createElement("div");
+  stage.className = "an-stage";
+  st.videoWrap.parentElement.insertBefore(stage, st.videoWrap);
+  const railTitle = _RAIL_TITLES[layer] || String(layer || "").toUpperCase();
+  const railL = document.createElement("div");
+  railL.className = "an-rail an-rail-left";
+  railL.innerHTML = `<div class="an-rail-title">${escapeHtml(railTitle)}
+    </div><div class="an-cards"></div>`;
+  const railR = document.createElement("div");
+  railR.className = "an-rail an-rail-right";
+  railR.innerHTML = railL.innerHTML;
+  stage.appendChild(railL);
+  stage.appendChild(st.videoWrap);
+  stage.appendChild(railR);
+  const leaders = document.createElementNS(
+    "http://www.w3.org/2000/svg", "svg");
+  leaders.setAttribute("class", "an-leaders");
+  stage.appendChild(leaders);
   st.analysis = {
     cam, layer,
     wrap,
     bar,
+    stage, railL, railR, leaders, stopChip,
     bg: wrap.querySelector(".analysis-bg"),
     canvas: wrap.querySelector(".analysis-canvas"),
     status: bar.querySelector(".analysis-status"),
@@ -999,7 +1320,7 @@ function beginTileAnalysis(st, cam, layer) {
       align-self:center;padding:0 8px">detections will appear here...</div>`;
   evStrip.querySelector(".events-saved-btn")
     .addEventListener("click", openSavedDetections);
-  st.videoWrap.insertAdjacentElement("afterend", evStrip);
+  stage.insertAdjacentElement("afterend", evStrip);
   st.analysis.evStrip = evStrip;
   pollAnalysisFrame(st);
   pollAnalysisEvents(st);
@@ -1485,7 +1806,13 @@ function _analysisDrawLoop(st, a) {
   const nowMs = performance.now();
   if (a._lastDrawMs && nowMs - a._lastDrawMs < 66) return;
   a._lastDrawMs = nowMs;
-  if (a.canvas.style.display === "none") return;
+  const _clearLeaders = () => {
+    if (a.leaders && a.leaders.childElementCount) {
+      a.leaders.replaceChildren();
+      a.leaders._nodes = null;
+    }
+  };
+  if (a.canvas.style.display === "none") { _clearLeaders(); return; }
   const buf = a.tickBuf;
   if (!buf.length) return;
   // Layer-switching placeholder (2026-08-16): the server keeps publishing
@@ -1513,6 +1840,7 @@ function _analysisDrawLoop(st, a) {
     ctx.fillRect((cw - tw) / 2, ch / 2 - 16, tw, 32);
     ctx.fillStyle = "#f8fafc";
     ctx.fillText(msg, (cw - tw) / 2 + 10, ch / 2 + 4);
+    _clearLeaders();
     return;
   }
   let merged = latestTick;
@@ -1574,6 +1902,8 @@ function _analysisDrawLoop(st, a) {
     merged = Object.assign({}, d, { boxes, _fade: fade });
   }
   _drawAnalysisOverlay(a.canvas, merged, 0);
+  try { _updateLeaders(a, merged); }
+  catch (_) { /* leaders are decorative - never break the draw loop */ }
 }
 
 function _lerpBox(b, nb, al) {
@@ -1867,7 +2197,22 @@ function _syncAnalysisBgVisibility(st) {
   const tickMs = a._tickEmaMs || 4000;
   const staleMs = Math.max(10000, tickMs * 3);
   const fresh = a._lastFreshMs || 0;
-  const stale = fresh > 0 && (Date.now() - fresh) > staleMs;
+  let ageMs = fresh > 0 ? Date.now() - fresh : 0;
+  // Self-heal absurd ages: a browser-frozen/throttled tab wakes up with
+  // a huge wall-clock gap that is NOT a pipeline stall (the backend kept
+  // ticking the whole time). Reset the clock and let one real poll
+  // re-establish the truth instead of flashing a monster number.
+  if (ageMs > 10 * 60 * 1000) {
+    a._lastFreshMs = Date.now();
+    ageMs = 0;
+  }
+  // A layer switch pauses publishing while the new layer's models load
+  // (plates on this CPU takes tens of seconds) - that freeze is the
+  // operator's own request, not a stall. Hold the ribbon during it.
+  const switching = (a.actualLayer && a.layer
+                     && a.actualLayer !== a.layer)
+    || (Date.now() - (a._switchPost || 0) < 90000);
+  const stale = !switching && ageMs > staleMs;
   let ribbon = st.videoWrap.querySelector(".analysis-stall-ribbon");
   if (stale) {
     if (!ribbon) {
@@ -1880,7 +2225,7 @@ function _syncAnalysisBgVisibility(st) {
       st.videoWrap.style.position = st.videoWrap.style.position || "relative";
       st.videoWrap.appendChild(ribbon);
     }
-    const ageS = Math.round((Date.now() - fresh) / 1000);
+    const ageS = Math.round(ageMs / 1000);
     ribbon.textContent =
       `Stream stalled - no fresh frame in ${ageS}s ` +
       `(check backend or reload the tab)`;
@@ -1933,6 +2278,10 @@ async function pollAnalysisFrame(st) {
           }
         }
         a._lastFreshMs = nowMs;
+        // A fresh payload kills the stall ribbon RIGHT NOW - never let
+        // stale ribbon text outlive the stall it reported.
+        const _rb = st.videoWrap.querySelector(".analysis-stall-ribbon");
+        if (_rb) _rb.remove();
         const prevTick = a.tickBuf[a.tickBuf.length - 1];
         if (prevTick) {
           const gap = (d.at || 0) - (prevTick.at || 0);
@@ -1965,6 +2314,8 @@ async function pollAnalysisFrame(st) {
         } catch (_) { /* pills are decorative - never break the poll */ }
         try { _updateAnalysisHud(a, d); }
         catch (_) { /* HUD is decorative - never break the poll */ }
+        try { _updateSideCards(st, a, d); }
+        catch (_) { /* side cards are decorative - never break the poll */ }
         if (d.layer === "fire" && d.fire) {
           const confirmed = !!d.fire.confirmed;
           const prev = !!a._fireConfirmed;
@@ -2297,11 +2648,24 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
   }
 
   if (d.layer === "faces") {
+    // Approved design: every face the SAME orange, plus a frame number
+    // that pairs the box with its side card and its saved crop.
     ctx.lineWidth = 2;
-    ctx.strokeStyle = "rgba(250,204,21,0.95)";
-    for (const f of d.faces || [])
-      ctx.strokeRect(f.x1 * sx, f.y1 * sy,
-                     (f.x2 - f.x1) * sx, (f.y2 - f.y1) * sy);
+    ctx.strokeStyle = "rgba(255,165,0,0.95)";
+    ctx.font = "700 12px system-ui, sans-serif";
+    for (const f of d.faces || []) {
+      const x = f.x1 * sx, y = f.y1 * sy;
+      ctx.strokeRect(x, y, (f.x2 - f.x1) * sx, (f.y2 - f.y1) * sy);
+      if (f.n != null) {
+        const n = String(f.n);
+        const tw = ctx.measureText(n).width + 8;
+        ctx.fillStyle = "rgba(255,165,0,0.95)";
+        ctx.fillRect(x, Math.max(0, y - 15), tw, 15);
+        ctx.fillStyle = "#0f172a";
+        ctx.fillText(n, x + 4, Math.max(11, y - 4));
+      }
+    }
+    ctx.font = "12px system-ui, sans-serif";
     if (d.faces_ok === false) {
       ctx.fillStyle = "rgba(15,23,42,0.85)";
       ctx.fillRect(8, 8, 220, 22);
@@ -2608,6 +2972,14 @@ function stopTileAnalysis(st) {
         { method: "POST" }).catch(() => {});
   const wrap = st.videoWrap.querySelector(".analysis-wrap");
   if (wrap) wrap.remove();
+  const chip = st.videoWrap.querySelector(".an-stop-chip");
+  if (chip) chip.remove();
+  // Unwrap the player from the side-rail stage so plain viewing gets
+  // its original full-width layout back.
+  if (a.stage && a.stage.parentElement) {
+    a.stage.parentElement.insertBefore(st.videoWrap, a.stage);
+    a.stage.remove();
+  }
   if (st.analysisBar) {
     st.analysisBar.remove();
     st.analysisBar = null;

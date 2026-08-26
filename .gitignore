@@ -63,6 +63,7 @@ src/data/crossings/
 src/data/events/
 src/data/lines/
 src/data/plate_crops/
+src/data/face_crops/
 src/data/*.db
 src/data/*.csv
 *.task

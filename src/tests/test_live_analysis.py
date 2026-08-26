@@ -373,3 +373,53 @@ def test_manager_stop(stub_manager):
     assert stub_manager.stop("th_green_mango") is True
     assert stub_manager.stop("th_green_mango") is False
     assert stub_manager.frame("th_green_mango") is None
+
+
+# ---------------------------------------------------------------------------
+# Side-card payload contract (approved layer design): every published
+# box carries `age` for the card's "in frame m:ss", pose/body persons
+# with keypoints carry an `activity` verdict, and faces carry their
+# on-frame number so card / box / crop all pair up.
+# ---------------------------------------------------------------------------
+
+def _session_with_person(layer):
+    import time as _t
+    s = la.LiveSession({"id": "th_green_mango", "name": "gm",
+                        "kind": "youtube", "url": "u"},
+                       model=None, layer=layer)
+    b = _box(300, 100, w=60, h=160)
+    now = _t.time()
+    tr = Track(1, dict(b), now - 65.0)
+    tr.add(dict(b), now - 5.0)
+    tr.add(dict(b), now)
+    tr.boxes[-1]["kps"] = _kps_for(b)
+
+    class _Trk:
+        open = [tr]
+    s.tracker = _Trk()
+    return s
+
+
+def test_publish_box_carries_age_and_activity():
+    s = _session_with_person("pose")
+    s._publish_data((360, 640, 3), [], "pose", None)
+    persons = [b for b in s.latest_data["boxes"] if b["cls"] == "person"]
+    assert persons, "tracked person must publish"
+    p = persons[0]
+    assert p.get("age") is not None and p["age"] >= 60, (
+        f"age must reflect first-seen (got {p.get('age')})")
+    assert p.get("kps"), "keypoints must ride the pose payload"
+    assert p.get("activity"), (
+        "pose person with keypoints must carry an activity verdict")
+
+
+def test_publish_faces_carry_numbers():
+    s = _session_with_person("faces")
+    s._faces_ok = True
+    faces = [
+        {"x1": 10, "y1": 10, "x2": 40, "y2": 40, "conf": 0.8, "n": 1},
+        {"x1": 90, "y1": 10, "x2": 120, "y2": 40, "conf": 0.7},
+    ]
+    s._publish_data((360, 640, 3), [], "faces", faces)
+    got = [f.get("n") for f in s.latest_data["faces"]]
+    assert got == [1, 2], f"faces must publish stable numbers, got {got}"

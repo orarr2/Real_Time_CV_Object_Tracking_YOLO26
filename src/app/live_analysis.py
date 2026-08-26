@@ -2357,6 +2357,13 @@ class LiveSession(threading.Thread):
         riders_pub = (_rider_person_tids(self.tracker.open)
                       if self.tracker and layer in ("body", "gestures")
                       else set())
+        _pub_now = time.time()
+        _cls_act = None
+        if layer in ("pose", "body"):
+            try:
+                from app.pose import classify_activity as _cls_act
+            except Exception:
+                _cls_act = None
         for tr in (self.tracker.open if self.tracker else []):
             last = tr.boxes[-1]
             conf = max(float(b.get("conf") or 0) for b in tr.boxes[-2:])
@@ -2376,6 +2383,10 @@ class LiveSession(threading.Thread):
                 "vx": round(float(tr.vx), 1),
                 "vy": round(float(tr.vy), 1),
             }
+            # Seconds this track has been in frame - feeds the side
+            # card's "in frame m:ss" field on every layer.
+            if tr.times:
+                jb["age"] = round(max(0.0, _pub_now - tr.times[0]), 1)
             if tr.misses:
                 # Coasting through a missed detection - the client draws
                 # it dashed so a box gliding on prediction alone is
@@ -2434,6 +2445,22 @@ class LiveSession(threading.Thread):
                 if kps and (jb["y2"] - jb["y1"]) >= KPS_MIN_BOX_H:
                     jb["kps"] = [[int(k[0]), int(k[1]), round(k[2], 2)]
                                  for k in kps]
+                if _cls_act and tr.cls == "person" and jb.get("kps"):
+                    # SKELETON - STANDING / WALKING / SITTING / LYING /
+                    # HANDS UP on the side card. hop_norm is the tracker's
+                    # per-second centroid speed over the box diagonal -
+                    # the same normalization classify_activity's WALKING
+                    # threshold was calibrated on.
+                    try:
+                        _diag = ((jb["x2"] - jb["x1"]) ** 2
+                                 + (jb["y2"] - jb["y1"]) ** 2) ** 0.5
+                        _hop = (((tr.vx ** 2 + tr.vy ** 2) ** 0.5)
+                                / max(_diag, 1.0))
+                        act = _cls_act(jb["kps"], hop_norm=_hop)
+                        if act:
+                            jb["activity"] = act
+                    except Exception:
+                        pass
                 if layer == "gestures" and tr.cls == "person" \
                         and jb.get("kps"):
                     # Static single-frame postures. Sequence-based hand
@@ -2605,8 +2632,11 @@ class LiveSession(threading.Thread):
             data["faces"] = [
                 {"x1": int(f["x1"]), "y1": int(f["y1"]),
                  "x2": int(f["x2"]), "y2": int(f["y2"]),
-                 "conf": round(float(f.get("conf") or 0), 2)}
-                for f in (faces_list or [])]
+                 "conf": round(float(f.get("conf") or 0), 2),
+                 # Frame number - pairs the on-frame digit with the
+                 # side card and the crop archive.
+                 "n": int(f.get("n", _i))}
+                for _i, f in enumerate(faces_list or [], 1)]
             data["faces_ok"] = bool(self._faces_ok)
         if layer == "plates":
             # 2026-08-17: YouTube gate removed; LPR attempts on every
