@@ -4,7 +4,7 @@ opencv-python-headless>=4.9 # frame decoding (headless variant for servers)
 opencv-contrib-python>=4.9  # dnn_superres for ESPCN 4x plate super-resolution
 
 # Live stream access
-yt-dlp>=2024.4.9            # resolves YouTube Live -> HLS (.m3u8) URLs
+yt-dlp>=2026.8.19           # resolves YouTube Live -> HLS (.m3u8) URLs; older builds fail against current YouTube
 
 # Notebook analysis + calibration
 pandas>=2.2

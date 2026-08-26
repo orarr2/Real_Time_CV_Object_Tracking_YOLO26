@@ -68,3 +68,4 @@ src/data/*.db
 src/data/*.csv
 *.task
 docs/
+src/data/yt_cookies.txt

@@ -359,17 +359,46 @@ def _yt_extractor_args(client: str) -> dict:
 
 
 def _yt_opts(client: str) -> dict:
-    """yt-dlp options for one resolution attempt. Cookies attach only
-    when the env-referenced file really exists; every call re-reads the
-    env so a notebook that sets YT_COOKIES_FILE after import picks it up
-    on the very next resolve."""
+    """yt-dlp options for one resolution attempt. Cookies attach from
+    whichever source is configured; every call re-reads the env so a
+    notebook that sets a var after import picks it up on the very next
+    resolve. Two mutually-exclusive sources, file first:
+
+      * YT_COOKIES_FILE   - path to a Netscape cookies.txt exported from
+                            a logged-in session (most robust; survives a
+                            running/locked browser and App-Bound crypto).
+      * YT_COOKIES_BROWSER - a browser name yt-dlp reads cookies live
+                            from (chrome/edge/firefox/brave...), optionally
+                            "browser:profile". Convenient when the browser
+                            is installed, signed in, and NOT running/locked.
+    """
     opts = {"quiet": True, "no_warnings": True,
             "format": "best[protocol^=m3u8]/best",
+            # yt-dlp 2026+ solves YouTube's JS challenges itself when a
+            # JS runtime is allowed; only deno is on by default, so
+            # explicitly permit node too (present on this host, and the
+            # challenge solve is what keeps innertube clients alive).
+            "js_runtimes": ["deno", "node"],
             "extractor_args": _yt_extractor_args(client)}
     cookies = (os.environ.get("YT_COOKIES_FILE")
                or _YT_COOKIES_FILE or "").strip()
-    if cookies and os.path.isfile(cookies):
+    if not (cookies and os.path.isfile(cookies)):
+        # Well-known drop point: src/data/yt_cookies.txt. Lets an
+        # operator refresh cookies by replacing one file - no env var,
+        # no notebook cell. The file is gitignored.
+        default_ck = os.path.join(os.path.dirname(__file__),
+                                  "..", "data", "yt_cookies.txt")
+        cookies = default_ck if os.path.isfile(default_ck) else ""
+    if cookies:
         opts["cookiefile"] = cookies
+    else:
+        browser = (os.environ.get("YT_COOKIES_BROWSER") or "").strip()
+        if browser:
+            # yt-dlp wants a tuple: (name, profile|None, keyring|None,
+            # container|None). Accept "edge" or "edge:Default".
+            name, _, profile = browser.partition(":")
+            opts["cookiesfrombrowser"] = (
+                name.lower(), profile or None, None, None)
     return opts
 
 
