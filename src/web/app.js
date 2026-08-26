@@ -494,6 +494,11 @@ const _HAND_WORDS_JS = { open_palm: "OPEN PALM", fist: "FIST",
     body.cinema-active #tile-single .an-stage {
       position: absolute !important; inset: 0 !important;
       display: block !important; }
+    /* Cinema keeps ONLY the frame + rails + bottom crops strip: the
+       in-flow status bar and events strip would otherwise paint across
+       the top of the fixed tile, on top of the rail cards. */
+    body.cinema-active .tile-status-bar,
+    body.cinema-active .events-strip { display: none !important; }
     body.cinema-active .an-rail { position: fixed; top: 0; bottom: 96px;
       width: var(--an-rail-w, 220px); z-index: 55; padding-top: 44px;
       background: transparent; }
@@ -652,9 +657,12 @@ function _updateLeaders(a, d) {
     if (!cardR.width) continue;
     const x1 = (e.side === "L" ? cardR.right : cardR.left) - svgR.left;
     const y1 = cardR.top + cardR.height / 2 - svgR.top;
-    const x2 = cvR.left - svgR.left
-      + ((b.x1 + b.x2) / 2) * (cvR.width / fw);
-    const y2 = cvR.top - svgR.top + (b.y1 + 6) * (cvR.height / fh);
+    // Same object-fit: contain mapping as the canvas drawer, so the
+    // leader tip lands on the letterboxed video content, not the wrap.
+    const fit = _containRect(cvR.width, cvR.height, fw, fh);
+    const x2 = cvR.left - svgR.left + fit.x
+      + ((b.x1 + b.x2) / 2) * (fit.w / fw);
+    const y2 = cvR.top - svgR.top + fit.y + (b.y1 + 6) * (fit.h / fh);
     let node = svg._nodes.get(e.tid);
     if (!node) {
       const line = document.createElementNS(NS, "line");
@@ -980,8 +988,12 @@ const DRAWABLE_LAYERS = { line: "Draw line",
 const ANALYSIS_POLL_MS = 500;
 
 const analysisPanel = document.createElement("div");
+// z-index above the Cinema floating buttons (2147483646): the picker
+// must stay reachable INSIDE Cinema, where the operator switches layers
+// from the floating Analyze button.
 analysisPanel.style.cssText =
-  "display:none;position:fixed;inset:0;z-index:60;background:rgba(2,6,23,.72);" +
+  "display:none;position:fixed;inset:0;z-index:2147483647;" +
+  "background:rgba(2,6,23,.72);" +
   "align-items:center;justify-content:center";
 analysisPanel.innerHTML = `
   <div style="background:#0f172a;border:1px solid #334155;border-radius:12px;
@@ -2395,6 +2407,16 @@ async function pollAnalysisFrame(st) {
   }
 }
 
+// Where an fw x fh frame actually sits inside a cw x ch box under
+// object-fit: contain - the same math the video element / YouTube
+// player applies, so overlay pixels and video pixels agree.
+function _containRect(cw, ch, fw, fh) {
+  const scale = Math.min(cw / Math.max(1, fw), ch / Math.max(1, fh));
+  const w = fw * scale, h = fh * scale;
+  return { x: (cw - w) / 2, y: (ch - h) / 2, w: Math.max(1, w),
+           h: Math.max(1, h) };
+}
+
 function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
   const nowMs = performance.now();
   let m = canvas._sizeCache;
@@ -2406,13 +2428,24 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
       ch: Math.max(1, Math.round(rect.height)),
     };
   }
-  const cw = m.cw, ch = m.ch;
-  if (canvas.width !== cw)  canvas.width = cw;
-  if (canvas.height !== ch) canvas.height = ch;
+  const cwFull = m.cw, chFull = m.ch;
+  if (canvas.width !== cwFull)  canvas.width = cwFull;
+  if (canvas.height !== chFull) canvas.height = chFull;
   const ctx = canvas.getContext("2d");
-  ctx.clearRect(0, 0, cw, ch);
-  const fw = Math.max(1, Number(d.frame_w) || cw);
-  const fh = Math.max(1, Number(d.frame_h) || ch);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, cwFull, chFull);
+  const fw = Math.max(1, Number(d.frame_w) || cwFull);
+  const fh = Math.max(1, Number(d.frame_h) || chFull);
+  // object-fit: contain mapping (operator bug 2026-08-26): in Cinema the
+  // wrap fills the whole viewport while the video letterboxes inside it
+  // at the frame's own aspect, so scaling boxes by the WRAP size drew
+  // them shifted off the objects. Draw in the letterboxed content rect
+  // instead: translate to its origin and scale by ITS size - every
+  // overlay coordinate below lands on the video pixels the operator
+  // actually sees, in Cinema and out of it.
+  const _fit = _containRect(cwFull, chFull, fw, fh);
+  ctx.translate(_fit.x, _fit.y);
+  const cw = _fit.w, ch = _fit.h;
   const sx = cw / fw, sy = ch / fh;
 
   if (d.layer === "heat" && Array.isArray(d.heat) && d.heat.length) {
