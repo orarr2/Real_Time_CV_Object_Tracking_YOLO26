@@ -378,7 +378,8 @@ def _yt_opts(client: str) -> dict:
             # JS runtime is allowed; only deno is on by default, so
             # explicitly permit node too (present on this host, and the
             # challenge solve is what keeps innertube clients alive).
-            "js_runtimes": ["deno", "node"],
+            # The Python API wants {runtime: {config}}, not a list.
+            "js_runtimes": {"deno": {}, "node": {}},
             "extractor_args": _yt_extractor_args(client)}
     cookies = (os.environ.get("YT_COOKIES_FILE")
                or _YT_COOKIES_FILE or "").strip()
