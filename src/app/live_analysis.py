@@ -215,6 +215,12 @@ REPLAY_FPS = 2.0
 REPLAY_RING_FRAMES = int(REPLAY_RING_S * REPLAY_FPS)
 TRACK_KEEP = 48           # per-track box history cap (live runs are open-ended)
 GRAB_FAIL_REFRESH = 3     # consecutive grab failures before re-resolving
+# Hard give-up: a camera that cannot produce a single frame after this
+# many consecutive failures self-terminates so it stops squatting on the
+# single MAX_SESSIONS slot and starving cameras that CAN stream. The
+# operator sees an honest "stream unreachable" and the slot frees for the
+# next start. ~GRAB_FAIL_GIVEUP x 2 s = the grace window.
+GRAB_FAIL_GIVEUP = 20     # ~40 s of nothing -> release the slot
 # Parking-spot probe: parked two-wheelers at night rarely clear the
 # tracker's confirmation gates (audit 2026-08-14: spots visibly full read
 # "0/2 occupied"), so the parking layer additionally re-detects each spot
@@ -1261,6 +1267,20 @@ class LiveSession(threading.Thread):
                     frame = self._grab()
                     _st_grab = (time.time() - _t) * 1000.0
                     if frame is None:
+                        # A camera that never produces a frame (e.g. an
+                        # unresolvable YouTube stream behind the bot-wall)
+                        # must not hold the single slot forever. After the
+                        # give-up threshold, stop so a working camera can
+                        # take the slot; the note stays honest.
+                        if self._fail >= GRAB_FAIL_GIVEUP:
+                            self.err = "stream unreachable"
+                            self._publish_note(
+                                "stream unreachable - released the slot "
+                                "(pick another camera or refresh cookies)")
+                            print(f"live-analysis {self.cam_id}: "
+                                  f"{self._fail} grab failures - releasing "
+                                  f"the slot")
+                            break
                         self._publish_note("stream unavailable - retrying...")
                         if self.stop_event.wait(2.0):
                             break
